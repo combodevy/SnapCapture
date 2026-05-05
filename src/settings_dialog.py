@@ -69,9 +69,31 @@ class HotkeyEdit(QLineEdit):
         self.setText(display)
 
     def mousePressEvent(self, event):
-        self._recording = True
-        self.setText("请按下快捷键组合...")
-        super().mousePressEvent(event)
+        if not self._recording:
+            # 进入录制模式
+            self._recording = True
+            self.setText("请按下快捷键或鼠标键...")
+            super().mousePressEvent(event)
+            return
+
+        # 如果处于录制模式，检查按下的鼠标键
+        button = event.button()
+        hotkey_str = None
+        
+        if button == Qt.MouseButton.MiddleButton:
+            hotkey_str = "mouse_middle"
+        elif button == Qt.MouseButton.BackButton or button == Qt.MouseButton.ExtraButton1:
+            hotkey_str = "mouse_x1"
+        elif button == Qt.MouseButton.ForwardButton or button == Qt.MouseButton.ExtraButton2:
+            hotkey_str = "mouse_x2"
+            
+        if hotkey_str:
+            self._recording = False
+            self.set_hotkey_text(hotkey_str)
+            self.hotkey_changed.emit(hotkey_str)
+        else:
+            # 如果是左键点击，不做特殊处理（可能想取消）
+            pass
 
     def keyPressEvent(self, event):
         if not self._recording:
@@ -98,11 +120,6 @@ class HotkeyEdit(QLineEdit):
         elif 0x20 <= key <= 0x7e:
             key_name = chr(key).lower()
         else:
-            return
-
-        # 必须包含至少一个修饰键
-        if not parts:
-            self.setText("请使用修饰键组合（如 Ctrl+Shift+...）")
             return
 
         parts.append(key_name)
