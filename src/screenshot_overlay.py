@@ -1,13 +1,10 @@
 """
-截屏覆盖层模块 - 全屏覆盖，支持矩形区域选择
-核心逻辑：
-1. 使用 mss 捕获物理像素级截图
-2. 将截图显示为覆盖层背景
-3. 用户拖拽选择区域
-4. 分辨率显示始终基于物理像素坐标计算，避免 DPI 缩放误差
+截屏覆盖层模块 - 全屏覆盖，支持矩形区域选择、拖拽缩放、自动窗口识别
 """
 import mss
 import mss.tools
+import ctypes
+from ctypes import wintypes
 from PyQt6.QtWidgets import QWidget, QApplication
 from PyQt6.QtGui import (
     QPainter, QPixmap, QColor, QPen, QFont, QImage,
@@ -18,19 +15,59 @@ from PyQt6.QtCore import Qt, QRect, QPoint, pyqtSignal, QTimer
 from src.magnifier import Magnifier
 from src.toolbar import Toolbar
 
+user32 = ctypes.windll.user32
+
+class RECT(ctypes.Structure):
+    _fields_ = [
+        ("left", ctypes.c_long),
+        ("top", ctypes.c_long),
+        ("right", ctypes.c_long),
+        ("bottom", ctypes.c_long)
+    ]
+
+class POINT(ctypes.Structure):
+    _fields_ = [
+        ("x", ctypes.c_long),
+        ("y", ctypes.c_long)
+    ]
+
+def get_window_rect_under_cursor(scale_x, scale_y, offset_x, offset_y):
+    """获取鼠标当前所在窗口的逻辑矩形区域"""
+    pt = POINT()
+    user32.GetCursorPos(ctypes.byref(pt))
+    hwnd = user32.WindowFromPoint(pt)
+    if not hwnd:
+        return None
+    
+    # 获取根窗口
+    GA_ROOT = 2
+    root_hwnd = user32.GetAncestor(hwnd, GA_ROOT)
+    
+    rect = RECT()
+    user32.GetWindowRect(root_hwnd, ctypes.byref(rect))
+    
+    # 转换为逻辑坐标 (减去虚拟桌面偏移，再除以缩放比)
+    x = int((rect.left - offset_x) / scale_x)
+    y = int((rect.top - offset_y) / scale_y)
+    w = int((rect.right - rect.left) / scale_x)
+    h = int((rect.bottom - rect.top) / scale_y)
+    
+    # 略微内缩以排除阴影，或者直接返回
+    return QRect(x, y, w, h)
+
 
 class ScreenshotOverlay(QWidget):
     """全屏截屏覆盖层"""
 
-    # 信号
-    screenshot_confirmed = pyqtSignal(QPixmap)   # 确认截图（复制到剪贴板）
-    screenshot_save = pyqtSignal(QPixmap)         # 保存截图到文件
-    capture_cancelled = pyqtSignal()              # 取消截屏
+    screenshot_confirmed = pyqtSignal(QPixmap)
+    screenshot_save = pyqtSignal(QPixmap)
+    capture_cancelled = pyqtSignal()
+
+    HANDLE_SIZE = 8
+    HANDLE_MARGIN = 4
 
     def __init__(self):
         super().__init__()
-
-        # 窗口属性
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
@@ -40,23 +77,26 @@ class ScreenshotOverlay(QWidget):
         self.setMouseTracking(True)
         self.setCursor(Qt.CursorShape.CrossCursor)
 
-        # 截图数据
-        self.screenshot_pixmap = None      # 物理像素级原始截图
-        self._screenshot_bytes = None      # 保持引用防止GC
-        self.scale_x = 1.0                 # 物理/逻辑 水平缩放比
-        self.scale_y = 1.0                 # 物理/逻辑 垂直缩放比
+        self.screenshot_pixmap = None
+        self._screenshot_bytes = None
+        self.scale_x = 1.0
+        self.scale_y = 1.0
 
-        # mss 截图区域信息（物理坐标偏移）
         self._mss_left = 0
         self._mss_top = 0
 
-        # 选区状态
-        self.start_point = None            # 拖拽起点（逻辑坐标）
-        self.current_point = None          # 当前鼠标位置（逻辑坐标）
-        self.is_selecting = False          # 是否正在拖拽选择
-        self.selection_done = False        # 选择完成（松开鼠标后）
+        self.start_point = None
+        self.current_point = None
+        self.is_selecting = False
+        self.selection_done = False
+        
+        # 拖拽调整
+        self.drag_mode = None  # 'tl', 't', 'tr', 'l', 'r', 'bl', 'b', 'br', 'move'
+        self.drag_offset = QPoint()
+        
+        # 自动窗口识别
+        self.auto_window_rect = None
 
-        # 子组件
         self.magnifier = Magnifier(self)
         self.toolbar = Toolbar(self)
         self.toolbar.confirm_clicked.connect(self._on_confirm)
@@ -64,39 +104,32 @@ class ScreenshotOverlay(QWidget):
         self.toolbar.cancel_clicked.connect(self._on_cancel)
 
     def start_capture(self):
-        """开始截屏：捕获屏幕并显示覆盖层"""
         self._reset_state()
         self._capture_screen()
         if self.screenshot_pixmap is None:
             return
 
-        # 设置覆盖层几何（覆盖虚拟桌面 = 所有显示器）
         virtual_geo = QGuiApplication.primaryScreen().virtualGeometry()
         self.setGeometry(virtual_geo)
 
-        # 计算物理↔逻辑缩放比
         self.scale_x = self.screenshot_pixmap.width() / virtual_geo.width()
         self.scale_y = self.screenshot_pixmap.height() / virtual_geo.height()
 
         self.magnifier.set_source(self.screenshot_pixmap, self.scale_x, self.scale_y)
-
         self.showFullScreen()
         self.activateWindow()
         self.setFocus()
 
     def _capture_screen(self):
-        """使用 mss 高速捕获全屏截图（物理像素）"""
         try:
             with mss.mss() as sct:
-                monitor = sct.monitors[0]  # 所有显示器合并区域
+                monitor = sct.monitors[0]
                 self._mss_left = monitor["left"]
                 self._mss_top = monitor["top"]
 
                 screenshot = sct.grab(monitor)
                 w, h = screenshot.width, screenshot.height
 
-                # mss 返回 BGRA 数据
-                # 在 little-endian 系统上，Qt Format_ARGB32 内存布局即为 BGRA
                 self._screenshot_bytes = bytes(screenshot.raw)
                 qimg = QImage(
                     self._screenshot_bytes, w, h,
@@ -108,27 +141,26 @@ class ScreenshotOverlay(QWidget):
             self.screenshot_pixmap = None
 
     def _reset_state(self):
-        """重置所有状态"""
         self.start_point = None
         self.current_point = None
         self.is_selecting = False
         self.selection_done = False
+        self.drag_mode = None
+        self.auto_window_rect = None
+        self.setCursor(Qt.CursorShape.CrossCursor)
         self.toolbar.hide()
         self.magnifier.hide()
 
     def _get_selection_rect(self) -> QRect | None:
-        """获取当前选区矩形（逻辑坐标）"""
         if self.start_point is None or self.current_point is None:
             return None
         return QRect(self.start_point, self.current_point).normalized()
 
     def _get_physical_rect(self, logical_rect: QRect) -> QRect:
-        """将逻辑坐标选区转换为物理像素坐标"""
         x = int(logical_rect.x() * self.scale_x)
         y = int(logical_rect.y() * self.scale_y)
         w = int(logical_rect.width() * self.scale_x)
         h = int(logical_rect.height() * self.scale_y)
-        # 钳制到截图范围
         if self.screenshot_pixmap:
             x = max(0, min(x, self.screenshot_pixmap.width() - 1))
             y = max(0, min(y, self.screenshot_pixmap.height() - 1))
@@ -137,7 +169,6 @@ class ScreenshotOverlay(QWidget):
         return QRect(x, y, w, h)
 
     def _crop_selection(self) -> QPixmap | None:
-        """从原始截图中裁切选中区域（物理像素精度）"""
         sel = self._get_selection_rect()
         if sel is None or sel.width() < 1 or sel.height() < 1:
             return None
@@ -146,61 +177,168 @@ class ScreenshotOverlay(QWidget):
             return None
         return self.screenshot_pixmap.copy(phys)
 
-    # ---- 鼠标事件 ----
+    def _get_handle_rects(self, sel: QRect):
+        hs = self.HANDLE_SIZE
+        hm = self.HANDLE_MARGIN
+        return {
+            'tl': QRect(sel.left() - hm, sel.top() - hm, hs, hs),
+            't': QRect(sel.center().x() - hs//2, sel.top() - hm, hs, hs),
+            'tr': QRect(sel.right() - hm + 1, sel.top() - hm, hs, hs),
+            'l': QRect(sel.left() - hm, sel.center().y() - hs//2, hs, hs),
+            'r': QRect(sel.right() - hm + 1, sel.center().y() - hs//2, hs, hs),
+            'bl': QRect(sel.left() - hm, sel.bottom() - hm + 1, hs, hs),
+            'b': QRect(sel.center().x() - hs//2, sel.bottom() - hm + 1, hs, hs),
+            'br': QRect(sel.right() - hm + 1, sel.bottom() - hm + 1, hs, hs)
+        }
+
+    def _update_cursor_shape(self, pos: QPoint):
+        if not self.selection_done:
+            self.setCursor(Qt.CursorShape.CrossCursor)
+            return
+
+        sel = self._get_selection_rect()
+        if not sel:
+            return
+
+        handles = self._get_handle_rects(sel)
+        
+        if handles['tl'].contains(pos) or handles['br'].contains(pos):
+            self.setCursor(Qt.CursorShape.SizeFDiagCursor)
+        elif handles['tr'].contains(pos) or handles['bl'].contains(pos):
+            self.setCursor(Qt.CursorShape.SizeBDiagCursor)
+        elif handles['l'].contains(pos) or handles['r'].contains(pos):
+            self.setCursor(Qt.CursorShape.SizeHorCursor)
+        elif handles['t'].contains(pos) or handles['b'].contains(pos):
+            self.setCursor(Qt.CursorShape.SizeVerCursor)
+        elif sel.contains(pos):
+            self.setCursor(Qt.CursorShape.SizeAllCursor)
+        else:
+            self.setCursor(Qt.CursorShape.CrossCursor)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             pos = event.position().toPoint()
+            
             if self.selection_done:
-                # 检查是否点在选区外，如果是则重新选择
                 sel = self._get_selection_rect()
-                if sel and sel.contains(pos):
-                    return  # 点在选区内，忽略
-                # 重新开始选择
+                handles = self._get_handle_rects(sel)
+                
+                # 检查是否点击了控制点
+                for mode, rect in handles.items():
+                    if rect.contains(pos):
+                        self.drag_mode = mode
+                        self.start_point = sel.topLeft()
+                        self.current_point = sel.bottomRight()
+                        self.toolbar.hide()
+                        return
+
+                # 检查是否点击了选区内部 (移动)
+                if sel.contains(pos):
+                    self.drag_mode = 'move'
+                    self.drag_offset = pos - sel.topLeft()
+                    self.toolbar.hide()
+                    return
+
+                # 点击了选区外，重新选择
                 self.selection_done = False
                 self.toolbar.hide()
 
+            # 开始新的选择
             self.start_point = pos
             self.current_point = pos
             self.is_selecting = True
+            self.auto_window_rect = None
             self.magnifier.show()
             self.update()
 
     def mouseMoveEvent(self, event):
         pos = event.position().toPoint()
+        self._update_cursor_shape(pos)
 
         if self.is_selecting:
             self.current_point = pos
             self.update()
+        elif self.drag_mode:
+            sel = self._get_selection_rect()
+            if self.drag_mode == 'move':
+                new_top_left = pos - self.drag_offset
+                w = sel.width()
+                h = sel.height()
+                # 防止移出屏幕
+                new_x = max(0, min(new_top_left.x(), self.width() - w))
+                new_y = max(0, min(new_top_left.y(), self.height() - h))
+                self.start_point = QPoint(new_x, new_y)
+                self.current_point = QPoint(new_x + w, new_y + h)
+            else:
+                # 调整大小
+                x1, y1 = self.start_point.x(), self.start_point.y()
+                x2, y2 = self.current_point.x(), self.current_point.y()
+                
+                # 保证 start 是左上，current 是右下
+                x_min, x_max = min(x1, x2), max(x1, x2)
+                y_min, y_max = min(y1, y2), max(y1, y2)
+                
+                if 'l' in self.drag_mode: x_min = pos.x()
+                if 'r' in self.drag_mode: x_max = pos.x()
+                if 't' in self.drag_mode: y_min = pos.y()
+                if 'b' in self.drag_mode: y_max = pos.y()
+                
+                self.start_point = QPoint(x_min, y_min)
+                self.current_point = QPoint(x_max, y_max)
+            self.update()
+        else:
+            # 未选择状态，自动识别窗口
+            if not self.selection_done:
+                rect = get_window_rect_under_cursor(self.scale_x, self.scale_y, self._mss_left, self._mss_top)
+                if rect:
+                    # 钳制在屏幕范围内
+                    rect = rect.intersected(self.rect())
+                    if rect != self.auto_window_rect:
+                        self.auto_window_rect = rect
+                        self.update()
 
         # 更新放大镜
-        if not self.selection_done:
+        if not self.selection_done and not self.drag_mode:
             self.magnifier.update_position(pos, self.width(), self.height())
             if not self.magnifier.isVisible():
                 self.magnifier.show()
             self.magnifier.raise_()
 
     def mouseReleaseEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton and self.is_selecting:
-            self.current_point = event.position().toPoint()
-            self.is_selecting = False
-            self.magnifier.hide()
+        if event.button() == Qt.MouseButton.LeftButton:
+            if self.is_selecting:
+                self.current_point = event.position().toPoint()
+                self.is_selecting = False
+                self.magnifier.hide()
 
-            sel = self._get_selection_rect()
-            if sel and sel.width() > 3 and sel.height() > 3:
-                self.selection_done = True
-                self.toolbar.update_position(sel, self.width(), self.height())
-                self.toolbar.show()
-                self.toolbar.raise_()
-            else:
-                # 选区太小，重置
-                self.start_point = None
-                self.current_point = None
+                # 如果没有拖拽（只是点击），且有自动识别的窗口，则直接选中该窗口
+                sel = self._get_selection_rect()
+                if sel and sel.width() < 5 and sel.height() < 5 and self.auto_window_rect:
+                    self.start_point = self.auto_window_rect.topLeft()
+                    self.current_point = self.auto_window_rect.bottomRight()
+                    sel = self._get_selection_rect()
+                
+                if sel and sel.width() > 3 and sel.height() > 3:
+                    self.selection_done = True
+                    self.toolbar.update_position(sel, self.width(), self.height())
+                    self.toolbar.show()
+                    self.toolbar.raise_()
+                else:
+                    self.start_point = None
+                    self.current_point = None
+                    
+            elif self.drag_mode:
+                self.drag_mode = None
+                sel = self._get_selection_rect()
+                if sel:
+                    self.selection_done = True
+                    self.toolbar.update_position(sel, self.width(), self.height())
+                    self.toolbar.show()
+                    self.toolbar.raise_()
 
             self.update()
 
     def mouseDoubleClickEvent(self, event):
-        """双击全屏截图"""
         if event.button() == Qt.MouseButton.LeftButton:
             self.start_point = QPoint(0, 0)
             self.current_point = QPoint(self.width(), self.height())
@@ -215,75 +353,36 @@ class ScreenshotOverlay(QWidget):
             if self.selection_done:
                 self._on_confirm()
 
-    # ---- 绘制 ----
-
     def paintEvent(self, event):
         if self.screenshot_pixmap is None:
             return
 
         painter = QPainter(self)
-
-        # 1. 绘制截图背景
         painter.drawPixmap(self.rect(), self.screenshot_pixmap)
 
-        # 2. 半透明遮罩
         overlay_color = QColor(0, 0, 0, 100)
-
         sel = self._get_selection_rect()
 
         if sel and (sel.width() > 0 and sel.height() > 0):
-            # 绘制四周遮罩（选区外部分）
             region = self.rect()
+            painter.fillRect(QRect(region.left(), region.top(), region.width(), sel.top() - region.top()), overlay_color)
+            painter.fillRect(QRect(region.left(), sel.bottom() + 1, region.width(), region.bottom() - sel.bottom()), overlay_color)
+            painter.fillRect(QRect(region.left(), sel.top(), sel.left() - region.left(), sel.height() + 1), overlay_color)
+            painter.fillRect(QRect(sel.right() + 1, sel.top(), region.right() - sel.right(), sel.height() + 1), overlay_color)
 
-            # 上方
-            painter.fillRect(
-                QRect(region.left(), region.top(), region.width(), sel.top() - region.top()),
-                overlay_color
-            )
-            # 下方
-            painter.fillRect(
-                QRect(region.left(), sel.bottom() + 1, region.width(), region.bottom() - sel.bottom()),
-                overlay_color
-            )
-            # 左侧
-            painter.fillRect(
-                QRect(region.left(), sel.top(), sel.left() - region.left(), sel.height() + 1),
-                overlay_color
-            )
-            # 右侧
-            painter.fillRect(
-                QRect(sel.right() + 1, sel.top(), region.right() - sel.right(), sel.height() + 1),
-                overlay_color
-            )
-
-            # 3. 选区边框
             pen = QPen(QColor(30, 144, 255), 2, Qt.PenStyle.SolidLine)
             painter.setPen(pen)
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRect(sel)
 
-            # 4. 八个调整手柄点（视觉参考）
-            handle_color = QColor(30, 144, 255)
-            handle_size = 6
-            handles = [
-                sel.topLeft(), QPoint(sel.center().x(), sel.top()), sel.topRight(),
-                QPoint(sel.left(), sel.center().y()), QPoint(sel.right(), sel.center().y()),
-                sel.bottomLeft(), QPoint(sel.center().x(), sel.bottom()), sel.bottomRight()
-            ]
-            painter.setBrush(handle_color)
+            handles = self._get_handle_rects(sel)
+            painter.setBrush(QColor(30, 144, 255))
             painter.setPen(QPen(QColor(255, 255, 255), 1))
-            for h in handles:
-                painter.drawRect(
-                    h.x() - handle_size // 2, h.y() - handle_size // 2,
-                    handle_size, handle_size
-                )
+            for rect in handles.values():
+                painter.drawRect(rect)
 
-            # 5. 分辨率信息标签（物理像素，确保准确）
             phys = self._get_physical_rect(sel)
-            phys_w = phys.width()
-            phys_h = phys.height()
-
-            size_text = f"{phys_w} × {phys_h}"
+            size_text = f"{phys.width()} × {phys.height()}"
 
             font = QFont("Microsoft YaHei UI", 11, QFont.Weight.Bold)
             painter.setFont(font)
@@ -291,59 +390,78 @@ class ScreenshotOverlay(QWidget):
             text_w = fm.horizontalAdvance(size_text) + 16
             text_h = fm.height() + 8
 
-            # 标签位置：选区左上方
             label_x = sel.left()
             label_y = sel.top() - text_h - 4
-
-            # 如果上方空间不足，显示在选区内部顶部
             if label_y < 0:
                 label_y = sel.top() + 4
 
-            # 背景
             label_rect = QRect(label_x, label_y, text_w, text_h)
             painter.fillRect(label_rect, QColor(30, 30, 30, 200))
             painter.setPen(QColor(80, 80, 80))
             painter.drawRect(label_rect)
 
-            # 文字
             painter.setPen(QColor(30, 200, 255))
-            painter.drawText(
-                label_rect,
-                Qt.AlignmentFlag.AlignCenter,
-                size_text
-            )
+            painter.drawText(label_rect, Qt.AlignmentFlag.AlignCenter, size_text)
+            
+        elif self.auto_window_rect and not self.is_selecting and not self.selection_done:
+            # 绘制全屏遮罩
+            painter.fillRect(self.rect(), overlay_color)
+            # 抠出自动识别的窗口区域
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
+            painter.fillRect(self.auto_window_rect, Qt.GlobalColor.transparent)
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+            
+            # 画一个蓝色边框
+            pen = QPen(QColor(30, 144, 255), 2, Qt.PenStyle.SolidLine)
+            painter.setPen(pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRect(self.auto_window_rect)
+            
+            # 分辨率
+            phys = self._get_physical_rect(self.auto_window_rect)
+            size_text = f"{phys.width()} × {phys.height()}"
+            font = QFont("Microsoft YaHei UI", 11, QFont.Weight.Bold)
+            painter.setFont(font)
+            fm = painter.fontMetrics()
+            text_w = fm.horizontalAdvance(size_text) + 16
+            text_h = fm.height() + 8
+
+            label_x = self.auto_window_rect.left()
+            label_y = self.auto_window_rect.top() - text_h - 4
+            if label_y < 0:
+                label_y = self.auto_window_rect.top() + 4
+
+            label_rect = QRect(label_x, label_y, text_w, text_h)
+            painter.fillRect(label_rect, QColor(30, 30, 30, 200))
+            painter.setPen(QColor(80, 80, 80))
+            painter.drawRect(label_rect)
+            painter.setPen(QColor(30, 200, 255))
+            painter.drawText(label_rect, Qt.AlignmentFlag.AlignCenter, size_text)
+            
         else:
-            # 没有选区时，整个屏幕覆盖半透明遮罩
             painter.fillRect(self.rect(), overlay_color)
 
         painter.end()
 
-    # ---- 操作回调 ----
-
     def _on_confirm(self):
-        """确认截图：复制到剪贴板"""
         pixmap = self._crop_selection()
         if pixmap:
             self.screenshot_confirmed.emit(pixmap)
         self._cleanup_and_hide()
 
     def _on_save(self):
-        """保存截图到文件"""
         pixmap = self._crop_selection()
         if pixmap:
             self.screenshot_save.emit(pixmap)
         self._cleanup_and_hide()
 
     def _on_cancel(self):
-        """取消截屏"""
         self.capture_cancelled.emit()
         self._cleanup_and_hide()
 
     def _cleanup_and_hide(self):
-        """清理资源并隐藏覆盖层"""
         self.hide()
         self._reset_state()
-        # 释放大截图内存
         self.screenshot_pixmap = None
         self._screenshot_bytes = None
         self.magnifier.source_pixmap = None

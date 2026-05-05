@@ -79,9 +79,7 @@ class SnapCaptureApp(QObject):
     def _on_screenshot_confirmed(self, pixmap):
         """截图确认：复制到剪贴板"""
         success = copy_pixmap_to_clipboard(pixmap)
-        if success:
-            self.tray.show_message("截图完成", "已复制到剪贴板", 1500)
-        else:
+        if not success:
             self.tray.show_message("截图失败", "复制到剪贴板失败", 2000)
 
     def _on_screenshot_save(self, pixmap):

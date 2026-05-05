@@ -52,9 +52,10 @@ class HotkeyEdit(QLineEdit):
                 color: #e0e0e0;
                 border: 2px solid #555;
                 border-radius: 6px;
-                padding: 8px 12px;
+                padding: 4px 10px;
                 font-size: 14px;
                 font-family: "Microsoft YaHei UI";
+                min-height: 24px;
             }
             QLineEdit:focus {
                 border-color: #1e90ff;
@@ -201,19 +202,8 @@ class SettingsDialog(QDialog):
         self.chk_autostart.setStyleSheet("""
             QCheckBox {
                 color: #e0e0e0;
-                font-size: 13px;
+                font-size: 14px;
                 spacing: 8px;
-            }
-            QCheckBox::indicator {
-                width: 18px;
-                height: 18px;
-                border: 2px solid #555;
-                border-radius: 4px;
-                background: #383838;
-            }
-            QCheckBox::indicator:checked {
-                background: #1e90ff;
-                border-color: #1e90ff;
             }
         """)
         self.chk_autostart.toggled.connect(self._on_autostart_changed)
