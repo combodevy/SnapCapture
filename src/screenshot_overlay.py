@@ -32,6 +32,19 @@ class POINT(ctypes.Structure):
         ("y", ctypes.c_long)
     ]
 
+def get_deepest_uia_element(control, x, y):
+    try:
+        children = control.GetChildren()
+    except Exception:
+        return control
+        
+    for child in children:
+        rect = child.BoundingRectangle
+        if rect and rect.left <= x < rect.right and rect.top <= y < rect.bottom:
+            deepest = get_deepest_uia_element(child, x, y)
+            return deepest if deepest else child
+    return control
+
 def get_window_rect_under_cursor(scale_x, scale_y, offset_x, offset_y, overlay_hwnd):
     """获取鼠标当前所在的最内层子窗口逻辑区域，通过临时忽略覆盖层实现精确探测"""
     GWL_EXSTYLE = -20
@@ -43,15 +56,23 @@ def get_window_rect_under_cursor(scale_x, scale_y, offset_x, offset_y, overlay_h
     
     pt = POINT()
     user32.GetCursorPos(ctypes.byref(pt))
-    
-    try:
-        control = auto.ControlFromPoint(pt.x, pt.y)
-        rect = control.BoundingRectangle
-    except Exception:
-        rect = None
+    hwnd = user32.WindowFromPoint(pt)
     
     # 恢复覆盖层属性
     user32.SetWindowLongW(overlay_hwnd, GWL_EXSTYLE, exstyle)
+    
+    if not hwnd or hwnd == overlay_hwnd:
+        return None
+        
+    try:
+        # 获取底层原生窗口对应的 UIA 节点
+        root_control = auto.ControlFromHandle(hwnd)
+        # 递归向下探测真正的深层子节点
+        target = get_deepest_uia_element(root_control, pt.x, pt.y)
+        rect = target.BoundingRectangle
+    except Exception as e:
+        print("UIA Exception:", e)
+        rect = None
     
     if not rect:
         return None
