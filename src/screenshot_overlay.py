@@ -4,6 +4,7 @@
 import mss
 import mss.tools
 import ctypes
+import uiautomation as auto
 from ctypes import wintypes
 from PyQt6.QtWidgets import QWidget, QApplication
 from PyQt6.QtGui import (
@@ -42,17 +43,19 @@ def get_window_rect_under_cursor(scale_x, scale_y, offset_x, offset_y, overlay_h
     
     pt = POINT()
     user32.GetCursorPos(ctypes.byref(pt))
-    hwnd = user32.WindowFromPoint(pt)
+    
+    try:
+        control = auto.ControlFromPoint(pt.x, pt.y)
+        rect = control.BoundingRectangle
+    except Exception:
+        rect = None
     
     # 恢复覆盖层属性
     user32.SetWindowLongW(overlay_hwnd, GWL_EXSTYLE, exstyle)
     
-    if not hwnd:
+    if not rect:
         return None
-    
-    rect = RECT()
-    user32.GetWindowRect(hwnd, ctypes.byref(rect))
-    
+        
     # 转换为逻辑坐标 (减去虚拟桌面偏移，再除以缩放比)
     x = int((rect.left - offset_x) / scale_x)
     y = int((rect.top - offset_y) / scale_y)
