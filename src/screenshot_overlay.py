@@ -31,20 +31,27 @@ class POINT(ctypes.Structure):
         ("y", ctypes.c_long)
     ]
 
-def get_window_rect_under_cursor(scale_x, scale_y, offset_x, offset_y):
-    """获取鼠标当前所在窗口的逻辑矩形区域"""
+def get_window_rect_under_cursor(scale_x, scale_y, offset_x, offset_y, overlay_hwnd):
+    """获取鼠标当前所在的最内层子窗口逻辑区域，通过临时忽略覆盖层实现精确探测"""
+    GWL_EXSTYLE = -20
+    WS_EX_TRANSPARENT = 0x00000020
+    
+    # 临时将覆盖层设为穿透
+    exstyle = user32.GetWindowLongW(overlay_hwnd, GWL_EXSTYLE)
+    user32.SetWindowLongW(overlay_hwnd, GWL_EXSTYLE, exstyle | WS_EX_TRANSPARENT)
+    
     pt = POINT()
     user32.GetCursorPos(ctypes.byref(pt))
     hwnd = user32.WindowFromPoint(pt)
+    
+    # 恢复覆盖层属性
+    user32.SetWindowLongW(overlay_hwnd, GWL_EXSTYLE, exstyle)
+    
     if not hwnd:
         return None
     
-    # 获取根窗口
-    GA_ROOT = 2
-    root_hwnd = user32.GetAncestor(hwnd, GA_ROOT)
-    
     rect = RECT()
-    user32.GetWindowRect(root_hwnd, ctypes.byref(rect))
+    user32.GetWindowRect(hwnd, ctypes.byref(rect))
     
     # 转换为逻辑坐标 (减去虚拟桌面偏移，再除以缩放比)
     x = int((rect.left - offset_x) / scale_x)
@@ -52,7 +59,6 @@ def get_window_rect_under_cursor(scale_x, scale_y, offset_x, offset_y):
     w = int((rect.right - rect.left) / scale_x)
     h = int((rect.bottom - rect.top) / scale_y)
     
-    # 略微内缩以排除阴影，或者直接返回
     return QRect(x, y, w, h)
 
 
@@ -289,7 +295,7 @@ class ScreenshotOverlay(QWidget):
         else:
             # 未选择状态，自动识别窗口
             if not self.selection_done:
-                rect = get_window_rect_under_cursor(self.scale_x, self.scale_y, self._mss_left, self._mss_top)
+                rect = get_window_rect_under_cursor(self.scale_x, self.scale_y, self._mss_left, self._mss_top, int(self.winId()))
                 if rect:
                     # 钳制在屏幕范围内
                     rect = rect.intersected(self.rect())
