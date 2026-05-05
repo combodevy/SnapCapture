@@ -4,7 +4,6 @@
 import mss
 import mss.tools
 import ctypes
-import uiautomation as auto
 from ctypes import wintypes
 from PyQt6.QtWidgets import QWidget, QApplication
 from PyQt6.QtGui import (
@@ -29,61 +28,7 @@ class RECT(ctypes.Structure):
 class POINT(ctypes.Structure):
     _fields_ = [
         ("x", ctypes.c_long),
-        ("y", ctypes.c_long)
     ]
-
-def get_deepest_uia_element(control, x, y):
-    try:
-        children = control.GetChildren()
-    except Exception:
-        return control
-        
-    for child in children:
-        rect = child.BoundingRectangle
-        if rect and rect.left <= x < rect.right and rect.top <= y < rect.bottom:
-            deepest = get_deepest_uia_element(child, x, y)
-            return deepest if deepest else child
-    return control
-
-def get_window_rect_under_cursor(scale_x, scale_y, offset_x, offset_y, overlay_hwnd):
-    """获取鼠标当前所在的最内层子窗口逻辑区域，通过临时忽略覆盖层实现精确探测"""
-    GWL_EXSTYLE = -20
-    WS_EX_TRANSPARENT = 0x00000020
-    
-    # 临时将覆盖层设为穿透
-    exstyle = user32.GetWindowLongW(overlay_hwnd, GWL_EXSTYLE)
-    user32.SetWindowLongW(overlay_hwnd, GWL_EXSTYLE, exstyle | WS_EX_TRANSPARENT)
-    
-    pt = POINT()
-    user32.GetCursorPos(ctypes.byref(pt))
-    hwnd = user32.WindowFromPoint(pt)
-    
-    # 恢复覆盖层属性
-    user32.SetWindowLongW(overlay_hwnd, GWL_EXSTYLE, exstyle)
-    
-    if not hwnd or hwnd == overlay_hwnd:
-        return None
-        
-    try:
-        # 获取底层原生窗口对应的 UIA 节点
-        root_control = auto.ControlFromHandle(hwnd)
-        # 递归向下探测真正的深层子节点
-        target = get_deepest_uia_element(root_control, pt.x, pt.y)
-        rect = target.BoundingRectangle
-    except Exception as e:
-        print("UIA Exception:", e)
-        rect = None
-    
-    if not rect:
-        return None
-        
-    # 转换为逻辑坐标 (减去虚拟桌面偏移，再除以缩放比)
-    x = int((rect.left - offset_x) / scale_x)
-    y = int((rect.top - offset_y) / scale_y)
-    w = int((rect.right - rect.left) / scale_x)
-    h = int((rect.bottom - rect.top) / scale_y)
-    
-    return QRect(x, y, w, h)
 
 
 class ScreenshotOverlay(QWidget):
@@ -123,9 +68,6 @@ class ScreenshotOverlay(QWidget):
         # 拖拽调整
         self.drag_mode = None  # 'tl', 't', 'tr', 'l', 'r', 'bl', 'b', 'br', 'move'
         self.drag_offset = QPoint()
-        
-        # 自动窗口识别
-        self.auto_window_rect = None
 
         self.magnifier = Magnifier(self)
         self.toolbar = Toolbar(self)
@@ -176,7 +118,6 @@ class ScreenshotOverlay(QWidget):
         self.is_selecting = False
         self.selection_done = False
         self.drag_mode = None
-        self.auto_window_rect = None
         self.setCursor(Qt.CursorShape.CrossCursor)
         self.toolbar.hide()
         self.magnifier.hide()
@@ -277,7 +218,6 @@ class ScreenshotOverlay(QWidget):
             self.start_point = pos
             self.current_point = pos
             self.is_selecting = True
-            self.auto_window_rect = None
             self.magnifier.show()
             self.update()
 
@@ -316,16 +256,7 @@ class ScreenshotOverlay(QWidget):
                 self.start_point = QPoint(x_min, y_min)
                 self.current_point = QPoint(x_max, y_max)
             self.update()
-        else:
-            # 未选择状态，自动识别窗口
-            if not self.selection_done:
-                rect = get_window_rect_under_cursor(self.scale_x, self.scale_y, self._mss_left, self._mss_top, int(self.winId()))
-                if rect:
-                    # 钳制在屏幕范围内
-                    rect = rect.intersected(self.rect())
-                    if rect != self.auto_window_rect:
-                        self.auto_window_rect = rect
-                        self.update()
+            pass
 
         # 更新放大镜
         if not self.selection_done and not self.drag_mode:
@@ -341,12 +272,7 @@ class ScreenshotOverlay(QWidget):
                 self.is_selecting = False
                 self.magnifier.hide()
 
-                # 如果没有拖拽（只是点击），且有自动识别的窗口，则直接选中该窗口
                 sel = self._get_selection_rect()
-                if sel and sel.width() < 5 and sel.height() < 5 and self.auto_window_rect:
-                    self.start_point = self.auto_window_rect.topLeft()
-                    self.current_point = self.auto_window_rect.bottomRight()
-                    sel = self._get_selection_rect()
                 
                 if sel and sel.width() > 3 and sel.height() > 3:
                     self.selection_done = True
@@ -430,43 +356,6 @@ class ScreenshotOverlay(QWidget):
             painter.setPen(QColor(80, 80, 80))
             painter.drawRect(label_rect)
 
-            painter.setPen(QColor(30, 200, 255))
-            painter.drawText(label_rect, Qt.AlignmentFlag.AlignCenter, size_text)
-            
-        elif self.auto_window_rect and not self.is_selecting and not self.selection_done:
-            # 采用绘制四周遮罩的方法，避免 CompositionMode_Clear 导致截屏背景变黑
-            region = self.rect()
-            sel = self.auto_window_rect
-            
-            painter.fillRect(QRect(region.left(), region.top(), region.width(), sel.top() - region.top()), overlay_color)
-            painter.fillRect(QRect(region.left(), sel.bottom() + 1, region.width(), region.bottom() - sel.bottom()), overlay_color)
-            painter.fillRect(QRect(region.left(), sel.top(), sel.left() - region.left(), sel.height() + 1), overlay_color)
-            painter.fillRect(QRect(sel.right() + 1, sel.top(), region.right() - sel.right(), sel.height() + 1), overlay_color)
-            
-            # 画一个蓝色边框
-            pen = QPen(QColor(30, 144, 255), 2, Qt.PenStyle.SolidLine)
-            painter.setPen(pen)
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawRect(self.auto_window_rect)
-            
-            # 分辨率
-            phys = self._get_physical_rect(self.auto_window_rect)
-            size_text = f"{phys.width()} × {phys.height()}"
-            font = QFont("Microsoft YaHei UI", 11, QFont.Weight.Bold)
-            painter.setFont(font)
-            fm = painter.fontMetrics()
-            text_w = fm.horizontalAdvance(size_text) + 16
-            text_h = fm.height() + 8
-
-            label_x = self.auto_window_rect.left()
-            label_y = self.auto_window_rect.top() - text_h - 4
-            if label_y < 0:
-                label_y = self.auto_window_rect.top() + 4
-
-            label_rect = QRect(label_x, label_y, text_w, text_h)
-            painter.fillRect(label_rect, QColor(30, 30, 30, 200))
-            painter.setPen(QColor(80, 80, 80))
-            painter.drawRect(label_rect)
             painter.setPen(QColor(30, 200, 255))
             painter.drawText(label_rect, Qt.AlignmentFlag.AlignCenter, size_text)
             
