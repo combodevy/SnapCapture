@@ -404,12 +404,14 @@ class ScreenshotOverlay(QWidget):
             painter.drawText(label_rect, Qt.AlignmentFlag.AlignCenter, size_text)
             
         elif self.auto_window_rect and not self.is_selecting and not self.selection_done:
-            # 绘制全屏遮罩
-            painter.fillRect(self.rect(), overlay_color)
-            # 抠出自动识别的窗口区域
-            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
-            painter.fillRect(self.auto_window_rect, Qt.GlobalColor.transparent)
-            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+            # 采用绘制四周遮罩的方法，避免 CompositionMode_Clear 导致截屏背景变黑
+            region = self.rect()
+            sel = self.auto_window_rect
+            
+            painter.fillRect(QRect(region.left(), region.top(), region.width(), sel.top() - region.top()), overlay_color)
+            painter.fillRect(QRect(region.left(), sel.bottom() + 1, region.width(), region.bottom() - sel.bottom()), overlay_color)
+            painter.fillRect(QRect(region.left(), sel.top(), sel.left() - region.left(), sel.height() + 1), overlay_color)
+            painter.fillRect(QRect(sel.right() + 1, sel.top(), region.right() - sel.right(), sel.height() + 1), overlay_color)
             
             # 画一个蓝色边框
             pen = QPen(QColor(30, 144, 255), 2, Qt.PenStyle.SolidLine)
