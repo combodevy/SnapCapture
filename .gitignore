@@ -1,0 +1,5 @@
+# SnapCapture Git Ignore Rules
+.system_generated/
+*.log
+.git/
+.vscode/

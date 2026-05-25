@@ -1,0 +1,13 @@
+﻿{
+  "hotkey": {
+    "type": "mouse",
+    "keys": [],
+    "mouse_button": "x1",
+    "suppress": true
+  },
+  "auto_start": true,
+  "save_to_clipboard": true,
+  "save_directory": "",
+  "notification": true,
+  "capture_mode": "region"
+}
