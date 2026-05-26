@@ -29,6 +29,6 @@
   "dialog_color_14": 3951847,
   "dialog_color_15": 14391348,
   "dialog_color_16": 7457838,
-  "round_radius": 25,
+  "round_radius": 10,
   "capture_mode": "region"
 }

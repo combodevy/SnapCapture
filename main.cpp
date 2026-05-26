@@ -108,6 +108,7 @@ enum AnnotationMode {
     ANNOTATION_ARROW,
     ANNOTATION_RECTANGLE,
     ANNOTATION_CIRCLE,
+    ANNOTATION_PENCIL,
     ANNOTATION_TEXT
 };
 
@@ -115,6 +116,7 @@ enum ShapeType {
     SHAPE_ARROW = 0,
     SHAPE_RECTANGLE,
     SHAPE_CIRCLE,
+    SHAPE_PENCIL,
     SHAPE_TEXT
 };
 
@@ -135,6 +137,7 @@ struct DrawingShape {
     wstring fontFamily = L"Microsoft YaHei";
     int fontStyle = 0; // 字体样式: Regular=0, Bold=1, Italic=2, BoldItalic=3
     int roundRadius = 0; // 圆角半径: 0 为直角，大于 0 为圆角
+    vector<POINT> points; // 画笔自由手绘的点集
 };
 
 AnnotationMode g_annotationMode = ANNOTATION_NONE;
@@ -327,6 +330,27 @@ void DrawRoundedRectangle(Graphics& g, Pen* pen, REAL x, REAL y, REAL width, REA
     path.CloseFigure();
     
     g.DrawPath(pen, &path);
+}
+
+// 新增：利用 GDI+ GraphicsPath 填充高精平滑圆角矩形
+void FillRoundedRectangle(Graphics& g, Brush* brush, REAL x, REAL y, REAL width, REAL height, REAL radius) {
+    if (radius <= 0.0f) {
+        g.FillRectangle(brush, x, y, width, height);
+        return;
+    }
+    
+    // 约束最大圆角半径不应超过宽高的一半
+    REAL maxRadius = min(width, height) / 2.0f;
+    if (radius > maxRadius) radius = maxRadius;
+    
+    GraphicsPath path;
+    path.AddArc(x, y, radius * 2, radius * 2, 180, 90); // 左上
+    path.AddArc(x + width - radius * 2, y, radius * 2, radius * 2, 270, 90); // 右上
+    path.AddArc(x + width - radius * 2, y + height - radius * 2, radius * 2, radius * 2, 0, 90); // 右下
+    path.AddArc(x, y + height - radius * 2, radius * 2, radius * 2, 90, 90); // 左下
+    path.CloseFigure();
+    
+    g.FillPath(brush, &path);
 }
 
 int ThicknessToFontSize(int thickness) {
@@ -806,14 +830,17 @@ struct ToolbarButton {
 
 vector<ToolbarButton> GetToolbarButtons(const RECT& sel, int width, int height) {
     vector<ToolbarButton> btns;
-    // 按钮总体尺寸 (精致扁平无 Emoji)
-    int btn_w = 68;
-    int btn_h = 30;
-    int spacing = 6;
-    int total_w = btn_w * 8 + spacing * 7 + 16; // 加上 padding (8个按钮)
+    // 按钮总体尺寸 (精致矢量化大图标，自绘免 emoji/font 依赖)
+    int btn_w = 44;
+    int btn_h = 36;
+    int spacing = 8;
+    int sep_w = 16; // 分割线空间宽度
+    
+    // 9个按钮，2个分割线区域，加上左右 padding
+    int total_w = btn_w * 9 + spacing * 6 + sep_w * 2 + 20;
     int total_h = btn_h + 12;
     if (g_annotationMode != ANNOTATION_NONE) {
-        total_h += 40; // 预留属性子工具栏的空间
+        total_h += 44; // 预留属性子工具栏的空间 (增大到 44px)
     }
     
     // 计算工具栏左上角坐标 (优先选区右下角外侧，边界避让)
@@ -833,104 +860,87 @@ vector<ToolbarButton> GetToolbarButtons(const RECT& sel, int width, int height) 
         tx = width - total_w - 4;
     }
     
-    int start_x = tx + 8;
+    int start_x = tx + 10;
     int start_y = ty + 6;
+    
+    // 计算每个按钮的 X 轴坐标
+    // 组 1: 矩形, 圆形, 箭头, 画笔, 文字 (5个)
+    int x0 = start_x;
+    int x1 = x0 + btn_w + spacing;
+    int x2 = x1 + btn_w + spacing;
+    int x3 = x2 + btn_w + spacing;
+    int x4 = x3 + btn_w + spacing;
+    
+    // 组 2: 撤销 (1个，在分割线 1 之后)
+    int x5 = x4 + btn_w + sep_w;
+    
+    // 组 3: 保存, 取消, 确定 (3个，在分割线 2 之后)
+    int x6 = x5 + btn_w + sep_w;
+    int x7 = x6 + btn_w + spacing;
+    int x8 = x7 + btn_w + spacing;
     
     // 1. 矩形
     ToolbarButton bRect;
-    bRect.rect = { start_x, start_y, start_x + btn_w, start_y + btn_h };
-    bRect.text = L"矩形";
-    if (g_annotationMode == ANNOTATION_RECTANGLE) {
-        bRect.color = Color(255, 0, 174, 255);       // 激活主题蓝 #00AEFF
-        bRect.hoverColor = Color(255, 0, 150, 220);
-        bRect.clickColor = Color(255, 0, 120, 190);
-    } else {
-        bRect.color = Color(255, 52, 73, 94);        // 未激活深蓝灰
-        bRect.hoverColor = Color(255, 44, 62, 80);
-        bRect.clickColor = Color(255, 30, 40, 50);
-    }
+    bRect.rect = { x0, start_y, x0 + btn_w, start_y + btn_h };
+    bRect.text = L"rect";
+    bRect.color = Color(255, 200, 200, 200); // 默认偏白灰
     btns.push_back(bRect);
     
     // 2. 圆形
     ToolbarButton bCircle;
-    bCircle.rect = { start_x + btn_w + spacing, start_y, start_x + btn_w * 2 + spacing, start_y + btn_h };
-    bCircle.text = L"圆形";
-    if (g_annotationMode == ANNOTATION_CIRCLE) {
-        bCircle.color = Color(255, 0, 174, 255);      // 激活主题蓝
-        bCircle.hoverColor = Color(255, 0, 150, 220);
-        bCircle.clickColor = Color(255, 0, 120, 190);
-    } else {
-        bCircle.color = Color(255, 52, 73, 94);       // 未激活深蓝灰
-        bCircle.hoverColor = Color(255, 44, 62, 80);
-        bCircle.clickColor = Color(255, 30, 40, 50);
-    }
+    bCircle.rect = { x1, start_y, x1 + btn_w, start_y + btn_h };
+    bCircle.text = L"circle";
+    bCircle.color = Color(255, 200, 200, 200);
     btns.push_back(bCircle);
     
     // 3. 箭头
     ToolbarButton bArrow;
-    bArrow.rect = { start_x + (btn_w + spacing) * 2, start_y, start_x + btn_w * 3 + spacing * 2, start_y + btn_h };
-    bArrow.text = L"箭头";
-    if (g_annotationMode == ANNOTATION_ARROW) {
-        bArrow.color = Color(255, 0, 174, 255);      // 激活主题蓝
-        bArrow.hoverColor = Color(255, 0, 150, 220);
-        bArrow.clickColor = Color(255, 0, 120, 190);
-    } else {
-        bArrow.color = Color(255, 52, 73, 94);       // 未激活深蓝灰
-        bArrow.hoverColor = Color(255, 44, 62, 80);
-        bArrow.clickColor = Color(255, 30, 40, 50);
-    }
+    bArrow.rect = { x2, start_y, x2 + btn_w, start_y + btn_h };
+    bArrow.text = L"arrow";
+    bArrow.color = Color(255, 200, 200, 200);
     btns.push_back(bArrow);
     
-    // 4. 文字
+    // 4. 画笔
+    ToolbarButton bPencil;
+    bPencil.rect = { x3, start_y, x3 + btn_w, start_y + btn_h };
+    bPencil.text = L"pencil";
+    bPencil.color = Color(255, 200, 200, 200);
+    btns.push_back(bPencil);
+    
+    // 5. 文字
     ToolbarButton bText;
-    bText.rect = { start_x + (btn_w + spacing) * 3, start_y, start_x + btn_w * 4 + spacing * 3, start_y + btn_h };
-    bText.text = L"文字";
-    if (g_annotationMode == ANNOTATION_TEXT) {
-        bText.color = Color(255, 0, 174, 255);
-        bText.hoverColor = Color(255, 0, 150, 220);
-        bText.clickColor = Color(255, 0, 120, 190);
-    } else {
-        bText.color = Color(255, 52, 73, 94);
-        bText.hoverColor = Color(255, 44, 62, 80);
-        bText.clickColor = Color(255, 30, 40, 50);
-    }
+    bText.rect = { x4, start_y, x4 + btn_w, start_y + btn_h };
+    bText.text = L"text";
+    bText.color = Color(255, 200, 200, 200);
     btns.push_back(bText);
     
-    // 5. 撤销
+    // 6. 撤销
     ToolbarButton bUndo;
-    bUndo.rect = { start_x + (btn_w + spacing) * 4, start_y, start_x + btn_w * 5 + spacing * 4, start_y + btn_h };
-    bUndo.text = L"撤销";
-    bUndo.color = Color(255, 70, 70, 70);
-    bUndo.hoverColor = Color(255, 90, 90, 90);
-    bUndo.clickColor = Color(255, 50, 50, 50);
+    bUndo.rect = { x5, start_y, x5 + btn_w, start_y + btn_h };
+    bUndo.text = L"undo";
+    bUndo.color = Color(255, 200, 200, 200);
     btns.push_back(bUndo);
     
-    // 6. 确定
-    ToolbarButton b1;
-    b1.rect = { start_x + (btn_w + spacing) * 5, start_y, start_x + btn_w * 6 + spacing * 5, start_y + btn_h };
-    b1.text = L"确定";
-    b1.color = Color(255, 39, 174, 96);
-    b1.hoverColor = Color(255, 46, 204, 113);
-    b1.clickColor = Color(255, 30, 132, 73);
-    btns.push_back(b1);
-    
     // 7. 保存
-    ToolbarButton b2;
-    b2.rect = { start_x + (btn_w + spacing) * 6, start_y, start_x + btn_w * 7 + spacing * 6, start_y + btn_h };
-    b2.text = L"保存";
-    b2.color = Color(255, 41, 128, 185);
-    b2.hoverColor = Color(255, 52, 152, 219);
-    b2.clickColor = Color(255, 31, 111, 165);
-    btns.push_back(b2);
+    ToolbarButton bSave;
+    bSave.rect = { x6, start_y, x6 + btn_w, start_y + btn_h };
+    bSave.text = L"save";
+    bSave.color = Color(255, 200, 200, 200);
+    btns.push_back(bSave);
     
-    // 8. 取消
-    ToolbarButton b3;
-    b3.rect = { start_x + (btn_w + spacing) * 7, start_y, start_x + btn_w * 8 + spacing * 7, start_y + btn_h };
-    b3.text = L"取消";
-    b3.color = Color(255, 120, 120, 120);
-    b3.hoverColor = Color(255, 231, 76, 60);
-    b3.clickColor = Color(255, 192, 57, 43);
-    btns.push_back(b3);
+    // 8. 取消 (红色)
+    ToolbarButton bCancel;
+    bCancel.rect = { x7, start_y, x7 + btn_w, start_y + btn_h };
+    bCancel.text = L"cancel";
+    bCancel.color = Color(255, 240, 92, 92); // 软红色
+    btns.push_back(bCancel);
+    
+    // 9. 确定 (绿色)
+    ToolbarButton bConfirm;
+    bConfirm.rect = { x8, start_y, x8 + btn_w, start_y + btn_h };
+    bConfirm.text = L"confirm";
+    bConfirm.color = Color(255, 46, 204, 113); // 软绿色
+    btns.push_back(bConfirm);
     
     return btns;
 }
@@ -1057,6 +1067,17 @@ HBITMAP CropScreenCapture(const RECT& sel) {
                 int rw = abs(startX - endX);
                 int rh = abs(startY - endY);
                 g.DrawEllipse(&pen, (REAL)rx, (REAL)ry, (REAL)rw, (REAL)rh);
+            } else if (shp.type == SHAPE_PENCIL) {
+                if (shp.points.size() > 1) {
+                    pen.SetStartCap(LineCapRound);
+                    pen.SetEndCap(LineCapRound);
+                    pen.SetLineJoin(LineJoinRound);
+                    vector<PointF> pts(shp.points.size());
+                    for (size_t k = 0; k < shp.points.size(); ++k) {
+                        pts[k] = PointF((REAL)(shp.points[k].x - x1), (REAL)(shp.points[k].y - y1));
+                    }
+                    g.DrawLines(&pen, pts.data(), (INT)pts.size());
+                }
             } else if (shp.type == SHAPE_TEXT && !shp.text.empty()) {
                 Font* pFont = CreateSafeGdiplusFont(shp.fontFamily.c_str(), (REAL)shp.fontSize, (FontStyle)shp.fontStyle);
                 
@@ -1260,6 +1281,17 @@ void DrawOverlay(HWND hWnd, HDC hdc) {
                 int rw = abs(shp.start.x - shp.end.x);
                 int rh = abs(shp.start.y - shp.end.y);
                 g.DrawEllipse(&pen, (REAL)rx, (REAL)ry, (REAL)rw, (REAL)rh);
+            } else if (shp.type == SHAPE_PENCIL) {
+                if (shp.points.size() > 1) {
+                    pen.SetStartCap(LineCapRound);
+                    pen.SetEndCap(LineCapRound);
+                    pen.SetLineJoin(LineJoinRound);
+                    vector<PointF> pts(shp.points.size());
+                    for (size_t k = 0; k < shp.points.size(); ++k) {
+                        pts[k] = PointF((REAL)shp.points[k].x, (REAL)shp.points[k].y);
+                    }
+                    g.DrawLines(&pen, pts.data(), (INT)pts.size());
+                }
             } else if (shp.type == SHAPE_TEXT && !shp.text.empty()) {
                 Font* pFont = CreateSafeGdiplusFont(shp.fontFamily.c_str(), (REAL)shp.fontSize, (FontStyle)shp.fontStyle);
                 if (shp.origW == 0.0f) {
@@ -1426,6 +1458,17 @@ void DrawOverlay(HWND hWnd, HDC hdc) {
                 int rw = abs(g_tempShape.start.x - g_tempShape.end.x);
                 int rh = abs(g_tempShape.start.y - g_tempShape.end.y);
                 g.DrawEllipse(&pen, (REAL)rx, (REAL)ry, (REAL)rw, (REAL)rh);
+            } else if (g_tempShape.type == SHAPE_PENCIL) {
+                if (g_tempShape.points.size() > 1) {
+                    pen.SetStartCap(LineCapRound);
+                    pen.SetEndCap(LineCapRound);
+                    pen.SetLineJoin(LineJoinRound);
+                    vector<PointF> pts(g_tempShape.points.size());
+                    for (size_t k = 0; k < g_tempShape.points.size(); ++k) {
+                        pts[k] = PointF((REAL)g_tempShape.points[k].x, (REAL)g_tempShape.points[k].y);
+                    }
+                    g.DrawLines(&pen, pts.data(), (INT)pts.size());
+                }
             }
         }
         
@@ -1495,18 +1538,137 @@ void DrawOverlay(HWND hWnd, HDC hdc) {
             Pen barBorderPen(Color(255, 60, 60, 60), 1.0f);
             g.DrawRectangle(&barBorderPen, min_x, min_y, max_x - min_x, max_y - min_y);
             
-            Font btnFont(L"Microsoft YaHei", 9, FontStyleBold);
             for (size_t i = 0; i < buttons.size(); ++i) {
-                Color c = buttons[i].color;
-                if (g_overlay.hoveredButton == (int)(i + 1)) {
-                    c = buttons[i].hoverColor;
+                RECT br = buttons[i].rect;
+                REAL bx = (REAL)br.left;
+                REAL by = (REAL)br.top;
+                REAL bw = (REAL)(br.right - br.left);
+                REAL bh = (REAL)(br.bottom - br.top);
+                
+                bool isHovered = (g_overlay.hoveredButton == (int)(i + 1));
+                bool isActive = false;
+                
+                // 检查该按钮是否处于激活的标注模式
+                if (i == 0 && g_annotationMode == ANNOTATION_RECTANGLE) isActive = true;
+                else if (i == 1 && g_annotationMode == ANNOTATION_CIRCLE) isActive = true;
+                else if (i == 2 && g_annotationMode == ANNOTATION_ARROW) isActive = true;
+                else if (i == 3 && g_annotationMode == ANNOTATION_PENCIL) isActive = true;
+                else if (i == 4 && g_annotationMode == ANNOTATION_TEXT) isActive = true;
+                
+                // A. 绘制按钮背景
+                if (isActive) {
+                    SolidBrush activeBgBrush(Color(255, 45, 55, 75)); // 微蓝灰
+                    FillRoundedRectangle(g, &activeBgBrush, bx, by, bw, bh, 5.0f);
+                    
+                    Pen activeBorderPen(Color(255, 0, 174, 255), 1.0f); // 品牌蓝
+                    DrawRoundedRectangle(g, &activeBorderPen, bx, by, bw, bh, 5.0f);
+                } 
+                else if (isHovered) {
+                    SolidBrush hoverBgBrush(Color(255, 55, 55, 55));
+                    FillRoundedRectangle(g, &hoverBgBrush, bx, by, bw, bh, 5.0f);
                 }
                 
-                SolidBrush bBrush(c);
-                RECT br = buttons[i].rect;
-                g.FillRectangle(&bBrush, (int)br.left, (int)br.top, (int)(br.right - br.left), (int)(br.bottom - br.top));
+                // B. 绘制矢量图形图标
+                Color iconColor = buttons[i].color;
+                if (isActive) {
+                    iconColor = Color(255, 0, 174, 255); // 激活图标变成品牌蓝色
+                } else if (isHovered) {
+                    if (i == 7) iconColor = Color(255, 255, 70, 70); // 悬停红更亮
+                    else if (i == 8) iconColor = Color(255, 70, 230, 130); // 悬停绿更亮
+                    else iconColor = Color(255, 255, 255, 255); // 普通白亮
+                }
                 
-                g.DrawString(buttons[i].text.c_str(), -1, &btnFont, RectF((REAL)br.left, (REAL)br.top, (REAL)(br.right - br.left), (REAL)(br.bottom - br.top)), &format, &textBrush);
+                REAL cx = bx + bw / 2.0f;
+                REAL cy = by + bh / 2.0f;
+                
+                Pen iconPen(iconColor, 1.5f);
+                iconPen.SetStartCap(LineCapRound);
+                iconPen.SetEndCap(LineCapRound);
+                iconPen.SetLineJoin(LineJoinRound);
+                
+                switch (i) {
+                    case 0: { // 矩形
+                        g.DrawRectangle(&iconPen, cx - 8.0f, cy - 8.0f, 16.0f, 16.0f);
+                        break;
+                    }
+                    case 1: { // 圆形
+                        g.DrawEllipse(&iconPen, cx - 8.0f, cy - 8.0f, 16.0f, 16.0f);
+                        break;
+                    }
+                    case 2: { // 箭头
+                        g.DrawLine(&iconPen, cx - 7.0f, cy + 7.0f, cx + 6.0f, cy - 6.0f);
+                        g.DrawLine(&iconPen, cx + 6.0f, cy - 6.0f, cx + 1.0f, cy - 6.0f);
+                        g.DrawLine(&iconPen, cx + 6.0f, cy - 6.0f, cx + 6.0f, cy - 1.0f);
+                        break;
+                    }
+                    case 3: { // 画笔 (简洁铅笔图标)
+                        // 笔杆顶端封口
+                        g.DrawLine(&iconPen, cx + 3.0f, cy - 9.0f, cx + 7.0f, cy - 5.0f);
+                        // 笔杆左侧
+                        g.DrawLine(&iconPen, cx + 3.0f, cy - 9.0f, cx - 5.0f, cy + 1.0f);
+                        // 笔杆右侧
+                        g.DrawLine(&iconPen, cx + 7.0f, cy - 5.0f, cx - 1.0f, cy + 5.0f);
+                        // 笔杆底部分界线
+                        g.DrawLine(&iconPen, cx - 5.0f, cy + 1.0f, cx - 1.0f, cy + 5.0f);
+                        // 笔尖左侧
+                        g.DrawLine(&iconPen, cx - 5.0f, cy + 1.0f, cx - 7.0f, cy + 8.0f);
+                        // 笔尖右侧
+                        g.DrawLine(&iconPen, cx - 1.0f, cy + 5.0f, cx - 7.0f, cy + 8.0f);
+                        break;
+                    }
+                    case 4: { // 文字 (正方形的框里面加个大写T)
+                        g.DrawRectangle(&iconPen, cx - 9.0f, cy - 9.0f, 18.0f, 18.0f);
+                        g.DrawLine(&iconPen, cx - 5.0f, cy - 5.0f, cx + 5.0f, cy - 5.0f);
+                        g.DrawLine(&iconPen, cx, cy - 5.0f, cx, cy + 5.0f);
+                        break;
+                    }
+                    case 5: { // 撤销 (逆时针不完整圆圈 + 箭头，稍粗一些)
+                        Pen undoPen(iconColor, 2.2f);
+                        undoPen.SetStartCap(LineCapRound);
+                        undoPen.SetEndCap(LineCapRound);
+                        undoPen.SetLineJoin(LineJoinRound);
+                        
+                        g.DrawArc(&undoPen, cx - 7.0f, cy - 7.0f, 14.0f, 14.0f, 180.0f, -270.0f);
+                        g.DrawLine(&undoPen, cx, cy - 7.0f, cx + 3.0f, cy - 10.0f);
+                        g.DrawLine(&undoPen, cx, cy - 7.0f, cx + 3.0f, cy - 4.0f);
+                        break;
+                    }
+                    case 6: { // 保存 (软盘的线条标志)
+                        GraphicsPath path;
+                        path.AddLine(cx - 8.0f, cy - 8.0f, cx + 4.0f, cy - 8.0f);
+                        path.AddLine(cx + 4.0f, cy - 8.0f, cx + 8.0f, cy - 4.0f);
+                        path.AddLine(cx + 8.0f, cy - 4.0f, cx + 8.0f, cy + 8.0f);
+                        path.AddLine(cx + 8.0f, cy + 8.0f, cx - 8.0f, cy + 8.0f);
+                        path.AddLine(cx - 8.0f, cy + 8.0f, cx - 8.0f, cy - 8.0f);
+                        g.DrawPath(&iconPen, &path);
+                        g.DrawRectangle(&iconPen, cx - 3.0f, cy - 8.0f, 6.0f, 4.0f);
+                        g.DrawRectangle(&iconPen, cx - 5.0f, cy + 1.0f, 10.0f, 7.0f);
+                        break;
+                    }
+                    case 7: { // 取消
+                        g.DrawLine(&iconPen, cx - 7.0f, cy - 7.0f, cx + 7.0f, cy + 7.0f);
+                        g.DrawLine(&iconPen, cx + 7.0f, cy - 7.0f, cx - 7.0f, cy + 7.0f);
+                        break;
+                    }
+                    case 8: { // 确定
+                        g.DrawLine(&iconPen, cx - 7.0f, cy + 1.0f, cx - 2.0f, cy + 6.0f);
+                        g.DrawLine(&iconPen, cx - 2.0f, cy + 6.0f, cx + 7.0f, cy - 4.0f);
+                        break;
+                    }
+                }
+            }
+            
+            // 绘制分割线
+            if (buttons.size() >= 7) {
+                Pen sepPen(Color(255, 55, 55, 55), 1.0f);
+                
+                // 分割线 1
+                int sep1_x = (buttons[4].rect.right + buttons[5].rect.left) / 2;
+                g.DrawLine(&sepPen, (REAL)sep1_x, (REAL)(min_y + 8), (REAL)sep1_x, (REAL)(max_y - 8));
+                
+                // 分割线 2
+                int sep2_x = (buttons[5].rect.right + buttons[6].rect.left) / 2;
+                g.DrawLine(&sepPen, (REAL)sep2_x, (REAL)(min_y + 8), (REAL)sep2_x, (REAL)(max_y - 8));
             }
             
             // 7. 绘制属性子工具栏 (仅在激活标注模式或选中文字时显示)
@@ -1657,10 +1819,10 @@ void DrawOverlay(HWND hWnd, HDC hdc) {
                     colorStart = 224;
                 }
                 for (int i = 0; i < 12; ++i) {
-                    int cx = st_x + colorStart + i * 24;
-                    int cy = st_y + 8;
-                    int cw = 18;
-                    int ch = 18;
+                    int cx = st_x + colorStart + i * 20;
+                    int cy = st_y + 9;
+                    int cw = 16;
+                    int ch = 16;
                     
                     if (i < 7) {
                         // 7个默认颜色
@@ -1710,8 +1872,8 @@ void DrawOverlay(HWND hWnd, HDC hdc) {
                         
                         // 绘制 "+" 矢量符号
                         Pen plusPen(Color(255, 220, 220, 220), 1.5f);
-                        g.DrawLine(&plusPen, cx + 4, cy + 9, cx + cw - 4, cy + 9);
-                        g.DrawLine(&plusPen, cx + 9, cy + 4, cx + 9, cy + ch - 4);
+                        g.DrawLine(&plusPen, cx + 3, cy + 8, cx + cw - 3, cy + 8);
+                        g.DrawLine(&plusPen, cx + 8, cy + 3, cx + 8, cy + ch - 3);
                     }
                 }
             }
@@ -1914,7 +2076,11 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
                 InvalidateRect(hWnd, NULL, FALSE);
             }
             else if (g_isDrawingShape) {
-                g_tempShape.end = pt;
+                if (g_tempShape.type == SHAPE_PENCIL) {
+                    g_tempShape.points.push_back(pt);
+                } else {
+                    g_tempShape.end = pt;
+                }
                 InvalidateRect(hWnd, NULL, FALSE);
             }
             else if (g_overlay.isSelecting) {
@@ -2451,9 +2617,9 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
                         colorStart = 224;
                     }
                     for (int i = 0; i < 12; ++i) {
-                        int cx = st_x + colorStart + i * 24;
-                        int cy = st_y + 8;
-                        RECT colRect = { cx, cy, cx + 18, cy + 18 };
+                        int cx = st_x + colorStart + i * 20;
+                        int cy = st_y + 9;
+                        RECT colRect = { cx, cy, cx + 16, cy + 16 };
                         if (PtInRect(&colRect, pt)) {
                             if (i < 7) {
                                 g_currentColor = colors[i];
@@ -2557,7 +2723,17 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
                         }
                         InvalidateRect(hWnd, NULL, FALSE);
                     }
-                    else if (btn == 4) { // 文字
+                    else if (btn == 4) { // 画笔
+                        finalizeEditingText();
+                        g_selectedTextIndex = -1;
+                        if (g_annotationMode == ANNOTATION_PENCIL) {
+                            g_annotationMode = ANNOTATION_NONE;
+                        } else {
+                            g_annotationMode = ANNOTATION_PENCIL;
+                        }
+                        InvalidateRect(hWnd, NULL, FALSE);
+                    }
+                    else if (btn == 5) { // 文字
                         finalizeEditingText();
                         g_selectedTextIndex = -1;
                         if (g_annotationMode == ANNOTATION_TEXT) {
@@ -2567,7 +2743,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
                         }
                         InvalidateRect(hWnd, NULL, FALSE);
                     }
-                    else if (btn == 5) { // 撤销
+                    else if (btn == 6) { // 撤销
                         g_selectedTextIndex = -1;
                         if (g_isEditingText) {
                             g_isEditingText = false;
@@ -2578,16 +2754,6 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
                         }
                         InvalidateRect(hWnd, NULL, FALSE);
                     }
-                    else if (btn == 6) { // 确定
-                        finalizeEditingText();
-                        g_selectedTextIndex = -1;
-                        HBITMAP hBmp = CropScreenCapture(g_overlay.selection);
-                        if (hBmp) {
-                            CopyBitmapToClipboard(hBmp);
-                            DeleteObject(hBmp);
-                        }
-                        SendMessage(hWnd, WM_CLOSE, 0, 0);
-                    } 
                     else if (btn == 7) { // 保存
                         finalizeEditingText();
                         g_selectedTextIndex = -1;
@@ -2613,6 +2779,16 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
                         SendMessage(hWnd, WM_CLOSE, 0, 0);
                     }
                     else if (btn == 8) { // 取消
+                        SendMessage(hWnd, WM_CLOSE, 0, 0);
+                    }
+                    else if (btn == 9) { // 确定
+                        finalizeEditingText();
+                        g_selectedTextIndex = -1;
+                        HBITMAP hBmp = CropScreenCapture(g_overlay.selection);
+                        if (hBmp) {
+                            CopyBitmapToClipboard(hBmp);
+                            DeleteObject(hBmp);
+                        }
                         SendMessage(hWnd, WM_CLOSE, 0, 0);
                     }
                     break; // 拦截消息，不往下处理
@@ -2815,12 +2991,16 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
                         // 其它标注模式，清除文字选择
                         g_selectedTextIndex = -1;
                         
-                        // 箭头/矩形/圆形模式
+                        // 箭头/矩形/圆形/画笔模式
                         g_isDrawingShape = true;
                         if (g_annotationMode == ANNOTATION_ARROW) {
                             g_tempShape.type = SHAPE_ARROW;
                         } else if (g_annotationMode == ANNOTATION_CIRCLE) {
                             g_tempShape.type = SHAPE_CIRCLE;
+                        } else if (g_annotationMode == ANNOTATION_PENCIL) {
+                            g_tempShape.type = SHAPE_PENCIL;
+                            g_tempShape.points.clear();
+                            g_tempShape.points.push_back(pt);
                         } else {
                             g_tempShape.type = SHAPE_RECTANGLE;
                         }
@@ -2885,9 +3065,19 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
                 g_isDrawingShape = false;
                 ReleaseCapture();
                 
-                int dx = g_tempShape.end.x - g_tempShape.start.x;
-                int dy = g_tempShape.end.y - g_tempShape.start.y;
-                if (sqrt(dx * dx + dy * dy) > 5) {
+                bool shouldAdd = false;
+                if (g_tempShape.type == SHAPE_PENCIL) {
+                    if (g_tempShape.points.size() > 1) {
+                        shouldAdd = true;
+                    }
+                } else {
+                    int dx = g_tempShape.end.x - g_tempShape.start.x;
+                    int dy = g_tempShape.end.y - g_tempShape.start.y;
+                    if (sqrt(dx * dx + dy * dy) > 5) {
+                        shouldAdd = true;
+                    }
+                }
+                if (shouldAdd) {
                     g_shapes.push_back(g_tempShape);
                 }
                 InvalidateRect(hWnd, NULL, FALSE);
@@ -3662,6 +3852,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     InitDpiAwareness();
     
     // 2. 单实例检测，防止多实例重复注册底层 Hook 锁死系统
+    SetLastError(ERROR_SUCCESS);
     HANDLE hMutex = CreateMutex(NULL, TRUE, L"CaptureTool_Mutex_Lock_v2");
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
         MessageBox(NULL, L"CaptureTool 已在运行中！\n请检查右下角系统托盘区域。", L"CaptureTool", MB_OK | MB_ICONWARNING);
