@@ -1653,6 +1653,9 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
             break;
         }
         case WM_RBUTTONDOWN: {
+            break;
+        }
+        case WM_RBUTTONUP: {
             SendMessage(hWnd, WM_CLOSE, 0, 0);
             break;
         }
