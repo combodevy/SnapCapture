@@ -16,6 +16,7 @@
 #include <sstream>
 #include <cmath>
 #include <cstdio>
+#include <dwmapi.h>
 
 #pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "gdiplus.lib")
@@ -23,6 +24,7 @@
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "dwmapi.lib")
 
 using namespace Gdiplus;
 using namespace std;
@@ -139,6 +141,11 @@ struct OverlayState {
     
     // 悬停高亮按钮索引 (1:✓ 确认, 2:💾 保存, 3:✗ 取消)
     int hoveredButton = 0; 
+    
+    // 智能窗口探测状态字段
+    RECT detectedWindowRect = { 0, 0, 0, 0 };
+    bool hasDetectedWindow = false;
+    bool isPossibleClick = false;
 };
 
 OverlayState g_overlay;
@@ -1031,6 +1038,10 @@ void DrawOverlay(HWND hWnd, HDC hdc) {
             SolidBrush barBrush(Color(220, 30, 30, 30));
             g.FillRectangle(&barBrush, min_x, min_y, max_x - min_x, max_y - min_y);
             
+            // 绘制 1px 细边框，符合方正简约气质
+            Pen barBorderPen(Color(255, 60, 60, 60), 1.0f);
+            g.DrawRectangle(&barBorderPen, min_x, min_y, max_x - min_x, max_y - min_y);
+            
             Font btnFont(L"Microsoft YaHei", 9, FontStyleBold);
             for (size_t i = 0; i < buttons.size(); ++i) {
                 Color c = buttons[i].color;
@@ -1053,6 +1064,7 @@ void DrawOverlay(HWND hWnd, HDC hdc) {
                 int st_h = 36;
                 
                 g.FillRectangle(&barBrush, st_x, st_y, st_w, st_h);
+                g.DrawRectangle(&barBorderPen, st_x, st_y, st_w, st_h);
                 
                 // --- 绘制粗细选择器 ---
                 int thicks[] = { 2, 4, 8 };
@@ -1108,30 +1120,121 @@ void DrawOverlay(HWND hWnd, HDC hdc) {
             }
         }
     } else {
-        // 绘制初始化指引提示文字
-        wstring hint = L"拖拽鼠标框选截图区域    按 Esc 取消";
-        Font font(L"Microsoft YaHei", 12, FontStyleRegular);
-        StringFormat format;
-        format.SetAlignment(StringAlignmentCenter);
-        format.SetLineAlignment(StringAlignmentCenter);
-        
-        RectF textBounding;
-        g.MeasureString(hint.c_str(), -1, &font, PointF(0, 0), &textBounding);
-        
-        int box_w = (int)textBounding.Width + 40;
-        int box_h = (int)textBounding.Height + 20;
-        int box_x = w / 2 - box_w / 2;
-        int box_y = h / 2 - box_h / 2;
-        
-        SolidBrush textBgBrush(Color(140, 0, 0, 0));
-        g.FillRectangle(&textBgBrush, box_x, box_y, box_w, box_h);
-        
-        SolidBrush textBrush(Color(180, 255, 255, 255));
-        g.DrawString(hint.c_str(), -1, &font, RectF((REAL)box_x, (REAL)box_y, (REAL)box_w, (REAL)box_h), &format, &textBrush);
+        // 智能窗口悬停高亮绘制逻辑
+        if (g_overlay.hasDetectedWindow) {
+            RECT rWin = g_overlay.detectedWindowRect;
+            int winW = rWin.right - rWin.left;
+            int winH = rWin.bottom - rWin.top;
+            if (winW > 0 && winH > 0) {
+                // A. 抠图：极速将探测出的悬停窗口部分复原为无遮罩原截屏背景 (零 CPU 混合开销)
+                BitBlt(hMemDC, rWin.left, rWin.top, winW, winH, g_hCaptureSourceDC, rWin.left, rWin.top, SRCCOPY);
+                
+                // B. 绘制悬停蓝光方正边框 (1.5px 品牌蓝 #00AEFF)
+                Pen hoverPen(Color(255, 0, 174, 255), 1.5f);
+                g.DrawRectangle(&hoverPen, rWin.left, rWin.top, winW, winH);
+            }
+        } else {
+            // 绘制初始化指引提示文字
+            wstring hint = L"拖拽鼠标框选截图区域    按 Esc 取消";
+            Font font(L"Microsoft YaHei", 12, FontStyleRegular);
+            StringFormat format;
+            format.SetAlignment(StringAlignmentCenter);
+            format.SetLineAlignment(StringAlignmentCenter);
+            
+            RectF textBounding;
+            g.MeasureString(hint.c_str(), -1, &font, PointF(0, 0), &textBounding);
+            
+            int box_w = (int)textBounding.Width + 40;
+            int box_h = (int)textBounding.Height + 20;
+            int box_x = w / 2 - box_w / 2;
+            int box_y = h / 2 - box_h / 2;
+            
+            SolidBrush textBgBrush(Color(140, 0, 0, 0));
+            g.FillRectangle(&textBgBrush, box_x, box_y, box_w, box_h);
+            
+            SolidBrush textBrush(Color(180, 255, 255, 255));
+            g.DrawString(hint.c_str(), -1, &font, RectF((REAL)box_x, (REAL)box_y, (REAL)box_w, (REAL)box_h), &format, &textBrush);
+        }
     }
     
     // 8. 一次性将完整的双缓冲结果贴图到屏幕 DC (Buttery Smooth!)
     BitBlt(hdc, 0, 0, w, h, hMemDC, 0, 0, SRCCOPY);
+}
+
+// ========== 智能窗口框选探测与过滤 API ==========
+BOOL IsValidWindow(HWND hWnd) {
+    if (!hWnd || hWnd == g_hWndOverlay || hWnd == g_hWndMain || hWnd == g_hWndSettings || hWnd == GetShellWindow() || hWnd == GetDesktopWindow()) {
+        return FALSE;
+    }
+    if (!IsWindowVisible(hWnd)) {
+        return FALSE;
+    }
+    
+    // 过滤掉无标题的子窗口或工具提示等
+    LONG style = GetWindowLong(hWnd, GWL_STYLE);
+    LONG exStyle = GetWindowLong(hWnd, GWL_EXSTYLE);
+    
+    if (exStyle & WS_EX_TOOLWINDOW) {
+        return FALSE;
+    }
+    
+    // 获取窗口标题，无标题且类名奇怪的过滤掉
+    wchar_t title[256];
+    GetWindowText(hWnd, title, 256);
+    if (wcslen(title) == 0) {
+        wchar_t className[256];
+        GetClassName(hWnd, className, 256);
+        if (wcscmp(className, L"Windows.UI.Core.CoreWindow") != 0 &&
+            wcscmp(className, L"ApplicationFrameWindow") != 0) {
+            return FALSE;
+        }
+    }
+    
+    // 过滤 Cloaked
+    DWORD cloaked = 0;
+    DwmGetWindowAttribute(hWnd, DWMWA_CLOAKED, &cloaked, sizeof(cloaked));
+    if (cloaked) {
+        return FALSE;
+    }
+    
+    // 过滤太小的隐藏窗口
+    RECT r;
+    GetWindowRect(hWnd, &r);
+    if (r.right - r.left < 40 || r.bottom - r.top < 40) {
+        return FALSE;
+    }
+    
+    return TRUE;
+}
+
+BOOL GetWindowRectAtPoint(POINT pt, RECT* pRect) {
+    HWND hWndPoint = WindowFromPoint(pt);
+    if (!hWndPoint) return FALSE;
+    
+    HWND hWndTop = GetAncestor(hWndPoint, GA_ROOT);
+    if (!hWndTop) return FALSE;
+    
+    while (hWndTop && !IsValidWindow(hWndTop)) {
+        hWndTop = GetParent(hWndTop);
+        if (hWndTop) {
+            hWndTop = GetAncestor(hWndTop, GA_ROOT);
+        }
+    }
+    
+    if (!hWndTop) return FALSE;
+    
+    RECT rc;
+    HRESULT hr = DwmGetWindowAttribute(hWndTop, DWMWA_EXTENDED_FRAME_BOUNDS, &rc, sizeof(rc));
+    if (FAILED(hr)) {
+        GetWindowRect(hWndTop, &rc);
+    }
+    
+    pRect->left = rc.left - g_screenX;
+    pRect->top = rc.top - g_screenY;
+    pRect->right = rc.right - g_screenX;
+    pRect->bottom = rc.bottom - g_screenY;
+    
+    return TRUE;
 }
 
 // ========== 全屏 Overlay 覆盖画布窗口过程 WndProc ==========
@@ -1154,6 +1257,13 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
                 InvalidateRect(hWnd, NULL, FALSE);
             }
             else if (g_overlay.isSelecting) {
+                if (g_overlay.isPossibleClick) {
+                    int dx = pt.x - g_overlay.startPos.x;
+                    int dy = pt.y - g_overlay.startPos.y;
+                    if (sqrt(dx * dx + dy * dy) > 5) {
+                        g_overlay.isPossibleClick = false; // 鼠标拖拽距离超过 5 像素，判定为拖拽框选，取消单击判定
+                    }
+                }
                 g_overlay.selection.right = pt.x;
                 g_overlay.selection.bottom = pt.y;
                 InvalidateRect(hWnd, NULL, FALSE);
@@ -1203,7 +1313,34 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
                 
                 g_overlay.selection = r;
                 InvalidateRect(hWnd, NULL, FALSE);
-            } else {
+            }
+            else if (!g_overlay.selectionDone) {
+                // 如果用户没有框选完成，且正处于悬停探索状态下：自动进行智能窗口捕获
+                POINT ptScreen = pt;
+                ptScreen.x += g_screenX;
+                ptScreen.y += g_screenY;
+                
+                RECT rcWin;
+                if (GetWindowRectAtPoint(ptScreen, &rcWin)) {
+                    if (!g_overlay.hasDetectedWindow || 
+                        rcWin.left != g_overlay.detectedWindowRect.left ||
+                        rcWin.top != g_overlay.detectedWindowRect.top ||
+                        rcWin.right != g_overlay.detectedWindowRect.right ||
+                        rcWin.bottom != g_overlay.detectedWindowRect.bottom) {
+                        
+                        g_overlay.detectedWindowRect = rcWin;
+                        g_overlay.hasDetectedWindow = true;
+                        InvalidateRect(hWnd, NULL, FALSE);
+                    }
+                } else {
+                    if (g_overlay.hasDetectedWindow) {
+                        g_overlay.hasDetectedWindow = false;
+                        InvalidateRect(hWnd, NULL, FALSE);
+                    }
+                }
+                SetCursor(LoadCursor(NULL, IDC_CROSS));
+            }
+            else {
                 // 如果正处于标注模式，且光标在选区内，设置为十字光标，不要显示大小调整光标
                 if (g_annotationMode != ANNOTATION_NONE && PtInRect(&g_overlay.selection, pt)) {
                     // 如果鼠标在工具栏或子工具栏按钮范围内，让它显示手形光标
@@ -1254,10 +1391,11 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
             pt.y = HIWORD(lParam);
             
             if (!g_overlay.selectionDone) {
-                // 开始全新框选
+                // 开始全新框选流程 (可能是单击选择窗体，也可能是长按拖拽选区)
                 g_overlay.startPos = pt;
                 g_overlay.selection = { pt.x, pt.y, pt.x, pt.y };
                 g_overlay.isSelecting = true;
+                g_overlay.isPossibleClick = true; // 先假设是点击，若鼠标产生拖拽位移则判定为长按拖拽
                 InvalidateRect(hWnd, NULL, FALSE);
             } else {
                 // 1. 判断是否点击在主工具栏或子工具栏的物理边界区域内 (防止误触导致选区重置)
@@ -1340,7 +1478,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
                     int btn = clickedBtn;
                     g_overlay.hoveredButton = clickedBtn; // 同步高亮状态
                     
-                    if (btn == 1) { // 口 矩形
+                    if (btn == 1) { // 矩形
                         if (g_annotationMode == ANNOTATION_RECTANGLE) {
                             g_annotationMode = ANNOTATION_NONE;
                         } else {
@@ -1348,7 +1486,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
                         }
                         InvalidateRect(hWnd, NULL, FALSE);
                     }
-                    else if (btn == 2) { // ↗ 箭头
+                    else if (btn == 2) { // 箭头
                         if (g_annotationMode == ANNOTATION_ARROW) {
                             g_annotationMode = ANNOTATION_NONE;
                         } else {
@@ -1356,13 +1494,13 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
                         }
                         InvalidateRect(hWnd, NULL, FALSE);
                     }
-                    else if (btn == 3) { // ↶ 撤销
+                    else if (btn == 3) { // 撤销
                         if (!g_shapes.empty()) {
                             g_shapes.pop_back();
                             InvalidateRect(hWnd, NULL, FALSE);
                         }
                     }
-                    else if (btn == 4) { // ✓ 确认
+                    else if (btn == 4) { // 确定
                         HBITMAP hBmp = CropScreenCapture(g_overlay.selection);
                         if (hBmp) {
                             CopyBitmapToClipboard(hBmp);
@@ -1370,7 +1508,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
                         }
                         SendMessage(hWnd, WM_CLOSE, 0, 0);
                     } 
-                    else if (btn == 5) { // 💾 保存
+                    else if (btn == 5) { // 保存
                         HBITMAP hBmp = CropScreenCapture(g_overlay.selection);
                         if (hBmp) {
                             CopyBitmapToClipboard(hBmp); // 默认也入剪贴板
@@ -1393,7 +1531,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
                         }
                         SendMessage(hWnd, WM_CLOSE, 0, 0);
                     }
-                    else if (btn == 6) { // ✗ 取消
+                    else if (btn == 6) { // 取消
                         SendMessage(hWnd, WM_CLOSE, 0, 0);
                     }
                     break; // 拦截消息，不往下处理
@@ -1429,6 +1567,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
                         g_overlay.startPos = pt;
                         g_overlay.selection = { pt.x, pt.y, pt.x, pt.y };
                         g_overlay.isSelecting = true;
+                        g_overlay.isPossibleClick = true; // 开始全新悬停/拖拉判定
                         InvalidateRect(hWnd, NULL, FALSE);
                     }
                 }
@@ -1450,20 +1589,32 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
             else if (g_overlay.isSelecting) {
                 g_overlay.isSelecting = false;
                 
-                // 计算并规范化选区
-                g_overlay.selection.left = min(g_overlay.startPos.x, (LONG)LOWORD(lParam));
-                g_overlay.selection.top = min(g_overlay.startPos.y, (LONG)HIWORD(lParam));
-                g_overlay.selection.right = max(g_overlay.startPos.x, (LONG)LOWORD(lParam));
-                g_overlay.selection.bottom = max(g_overlay.startPos.y, (LONG)HIWORD(lParam));
-                
-                int w = g_overlay.selection.right - g_overlay.selection.left;
-                int h = g_overlay.selection.bottom - g_overlay.selection.top;
-                
-                if (w > MIN_SELECTION_SIZE && h > MIN_SELECTION_SIZE) {
-                    g_overlay.selectionDone = true;
+                if (g_overlay.isPossibleClick) {
+                    // 这是一次短促的单击选择窗口事件！
+                    if (g_overlay.hasDetectedWindow) {
+                        g_overlay.selection = g_overlay.detectedWindowRect;
+                        g_overlay.selectionDone = true;
+                        g_overlay.hasDetectedWindow = false; // 选定后关闭悬停指示
+                    } else {
+                        g_overlay.selection = { 0, 0, 0, 0 };
+                        g_overlay.selectionDone = false;
+                    }
                 } else {
-                    g_overlay.selection = { 0, 0, 0, 0 };
-                    g_overlay.selectionDone = false;
+                    // 这是一次长按鼠标左键拖拽框选的流程！
+                    g_overlay.selection.left = min(g_overlay.startPos.x, (LONG)LOWORD(lParam));
+                    g_overlay.selection.top = min(g_overlay.startPos.y, (LONG)HIWORD(lParam));
+                    g_overlay.selection.right = max(g_overlay.startPos.x, (LONG)LOWORD(lParam));
+                    g_overlay.selection.bottom = max(g_overlay.startPos.y, (LONG)HIWORD(lParam));
+                    
+                    int w = g_overlay.selection.right - g_overlay.selection.left;
+                    int h = g_overlay.selection.bottom - g_overlay.selection.top;
+                    
+                    if (w > MIN_SELECTION_SIZE && h > MIN_SELECTION_SIZE) {
+                        g_overlay.selectionDone = true;
+                    } else {
+                        g_overlay.selection = { 0, 0, 0, 0 };
+                        g_overlay.selectionDone = false;
+                    }
                 }
                 InvalidateRect(hWnd, NULL, FALSE);
             } 

@@ -16,7 +16,7 @@ Write-Host "Compiling main.cpp..." -ForegroundColor Yellow
 
 # Run g++ compiler with high optimization (-O3) and subsystem windows (-mwindows to hide command prompt)
 # Static link (-static) to bundle everything in a single standalone .exe
-g++ -std=c++11 -O3 -mwindows -static main.cpp -lgdi32 -lgdiplus -lshlwapi -luser32 -lshell32 -lole32 -lcomdlg32 -o CaptureTool.exe
+g++ -std=c++11 -O3 -mwindows -static main.cpp -lgdi32 -lgdiplus -lshlwapi -luser32 -lshell32 -lole32 -lcomdlg32 -ldwmapi -o CaptureTool.exe
 
 if ($LASTEXITCODE -eq 0) {
     Write-Host ""
