@@ -98,12 +98,14 @@ HotkeyConfig g_recordedHotkey;
 enum AnnotationMode {
     ANNOTATION_NONE = 0,
     ANNOTATION_ARROW,
-    ANNOTATION_RECTANGLE
+    ANNOTATION_RECTANGLE,
+    ANNOTATION_TEXT
 };
 
 enum ShapeType {
     SHAPE_ARROW = 0,
-    SHAPE_RECTANGLE
+    SHAPE_RECTANGLE,
+    SHAPE_TEXT
 };
 
 struct DrawingShape {
@@ -112,6 +114,7 @@ struct DrawingShape {
     POINT end;
     Color color;
     int thickness;
+    wstring text;
 };
 
 AnnotationMode g_annotationMode = ANNOTATION_NONE;
@@ -122,6 +125,20 @@ DrawingShape g_tempShape;
 // 当前属性选择状态
 Color g_currentColor = Color(255, 231, 76, 60); // 默认红色
 int g_currentThickness = 4; // 默认中号 4px
+
+// 文字标注状态
+bool g_isEditingText = false;
+wstring g_editingText = L"";
+POINT g_editTextPos = { 0, 0 };
+int g_draggingTextIndex = -1;
+POINT g_textDragOffset = { 0, 0 };
+bool g_isDraggingText = false;
+
+int ThicknessToFontSize(int thickness) {
+    if (thickness <= 2) return 14;
+    if (thickness <= 4) return 20;
+    return 32;
+}
 
 // ========== 拖动调整大小手柄与交互状态 ==========
 enum ResizeHandle {
@@ -581,7 +598,7 @@ vector<ToolbarButton> GetToolbarButtons(const RECT& sel, int width, int height) 
     int btn_w = 68;
     int btn_h = 30;
     int spacing = 6;
-    int total_w = btn_w * 6 + spacing * 5 + 16; // 加上 padding (6个按钮)
+    int total_w = btn_w * 7 + spacing * 6 + 16; // 加上 padding (7个按钮)
     int total_h = btn_h + 12;
     if (g_annotationMode != ANNOTATION_NONE) {
         total_h += 40; // 预留属性子工具栏的空间
@@ -637,39 +654,54 @@ vector<ToolbarButton> GetToolbarButtons(const RECT& sel, int width, int height) 
     }
     btns.push_back(bArrow);
     
-    // 3. 撤销
+    // 3. 文字
+    ToolbarButton bText;
+    bText.rect = { start_x + (btn_w + spacing) * 2, start_y, start_x + btn_w * 3 + spacing * 2, start_y + btn_h };
+    bText.text = L"文字";
+    if (g_annotationMode == ANNOTATION_TEXT) {
+        bText.color = Color(255, 0, 174, 255);
+        bText.hoverColor = Color(255, 0, 150, 220);
+        bText.clickColor = Color(255, 0, 120, 190);
+    } else {
+        bText.color = Color(255, 52, 73, 94);
+        bText.hoverColor = Color(255, 44, 62, 80);
+        bText.clickColor = Color(255, 30, 40, 50);
+    }
+    btns.push_back(bText);
+    
+    // 4. 撤销
     ToolbarButton bUndo;
-    bUndo.rect = { start_x + (btn_w + spacing) * 2, start_y, start_x + btn_w * 3 + spacing * 2, start_y + btn_h };
+    bUndo.rect = { start_x + (btn_w + spacing) * 3, start_y, start_x + btn_w * 4 + spacing * 3, start_y + btn_h };
     bUndo.text = L"撤销";
-    bUndo.color = Color(255, 70, 70, 70);        // 扁平灰
+    bUndo.color = Color(255, 70, 70, 70);
     bUndo.hoverColor = Color(255, 90, 90, 90);
     bUndo.clickColor = Color(255, 50, 50, 50);
     btns.push_back(bUndo);
     
-    // 4. 确定
+    // 5. 确定
     ToolbarButton b1;
-    b1.rect = { start_x + (btn_w + spacing) * 3, start_y, start_x + btn_w * 4 + spacing * 3, start_y + btn_h };
+    b1.rect = { start_x + (btn_w + spacing) * 4, start_y, start_x + btn_w * 5 + spacing * 4, start_y + btn_h };
     b1.text = L"确定";
-    b1.color = Color(255, 39, 174, 96);       // 扁平绿 #27AE60
+    b1.color = Color(255, 39, 174, 96);
     b1.hoverColor = Color(255, 46, 204, 113);
     b1.clickColor = Color(255, 30, 132, 73);
     btns.push_back(b1);
     
-    // 5. 保存
+    // 6. 保存
     ToolbarButton b2;
-    b2.rect = { start_x + (btn_w + spacing) * 4, start_y, start_x + btn_w * 5 + spacing * 4, start_y + btn_h };
+    b2.rect = { start_x + (btn_w + spacing) * 5, start_y, start_x + btn_w * 6 + spacing * 5, start_y + btn_h };
     b2.text = L"保存";
-    b2.color = Color(255, 41, 128, 185);      // 扁平蓝 #2980B9
+    b2.color = Color(255, 41, 128, 185);
     b2.hoverColor = Color(255, 52, 152, 219);
     b2.clickColor = Color(255, 31, 111, 165);
     btns.push_back(b2);
     
-    // 6. 取消
+    // 7. 取消
     ToolbarButton b3;
-    b3.rect = { start_x + (btn_w + spacing) * 5, start_y, start_x + btn_w * 6 + spacing * 5, start_y + btn_h };
+    b3.rect = { start_x + (btn_w + spacing) * 6, start_y, start_x + btn_w * 7 + spacing * 6, start_y + btn_h };
     b3.text = L"取消";
-    b3.color = Color(255, 120, 120, 120);     // 灰色
-    b3.hoverColor = Color(255, 231, 76, 60);  // 扁平红 #E74C3C
+    b3.color = Color(255, 120, 120, 120);
+    b3.hoverColor = Color(255, 231, 76, 60);
     b3.clickColor = Color(255, 192, 57, 43);
     btns.push_back(b3);
     
@@ -792,6 +824,12 @@ HBITMAP CropScreenCapture(const RECT& sel) {
                 int rw = abs(startX - endX);
                 int rh = abs(startY - endY);
                 g.DrawRectangle(&pen, rx, ry, rw, rh);
+            } else if (shp.type == SHAPE_TEXT && !shp.text.empty()) {
+                int fontSize = ThicknessToFontSize(shp.thickness);
+                Font txtFont(L"Microsoft YaHei", (REAL)fontSize, FontStyleBold);
+                SolidBrush txtBrush(shp.color);
+                g.SetTextRenderingHint(TextRenderingHintAntiAlias);
+                g.DrawString(shp.text.c_str(), -1, &txtFont, PointF((REAL)startX, (REAL)startY), &txtBrush);
             }
         }
     }
@@ -944,7 +982,7 @@ void DrawOverlay(HWND hWnd, HDC hdc) {
         // 2. 抠图：在选区部分以 Direct BitBlt 恢复清晰原背景 (零 CPU Alpha Blending 开销)
         BitBlt(hMemDC, sel.left, sel.top, sel.right - sel.left, sel.bottom - sel.top, g_hCaptureSourceDC, sel.left, sel.top, SRCCOPY);
         
-        // 绘制所有已画好的标注图形 (包括箭头 and 矩形框)
+        // 绘制所有已画好的标注图形 (包括箭头、矩形框、文字)
         for (const auto& shp : g_shapes) {
             Pen pen(shp.color, (REAL)shp.thickness);
             if (shp.type == SHAPE_ARROW) {
@@ -957,7 +995,52 @@ void DrawOverlay(HWND hWnd, HDC hdc) {
                 int rw = abs(shp.start.x - shp.end.x);
                 int rh = abs(shp.start.y - shp.end.y);
                 g.DrawRectangle(&pen, rx, ry, rw, rh);
+            } else if (shp.type == SHAPE_TEXT && !shp.text.empty()) {
+                int fontSize = ThicknessToFontSize(shp.thickness);
+                Font txtFont(L"Microsoft YaHei", (REAL)fontSize, FontStyleBold);
+                SolidBrush txtBrush(shp.color);
+                g.SetTextRenderingHint(TextRenderingHintAntiAlias);
+                g.DrawString(shp.text.c_str(), -1, &txtFont, PointF((REAL)shp.start.x, (REAL)shp.start.y), &txtBrush);
             }
+        }
+        
+        // 绘制正在编辑中的文字（带光标）
+        if (g_isEditingText) {
+            int fontSize = ThicknessToFontSize(g_currentThickness);
+            Font txtFont(L"Microsoft YaHei", (REAL)fontSize, FontStyleBold);
+            SolidBrush txtBrush(g_currentColor);
+            g.SetTextRenderingHint(TextRenderingHintAntiAlias);
+            
+            wstring displayText = g_editingText;
+            if (displayText.empty()) displayText = L" ";
+            g.DrawString(g_editingText.c_str(), -1, &txtFont, PointF((REAL)g_editTextPos.x, (REAL)g_editTextPos.y), &txtBrush);
+            
+            // 计算光标位置
+            RectF cursorBound;
+            if (!g_editingText.empty()) {
+                g.MeasureString(g_editingText.c_str(), -1, &txtFont, PointF((REAL)g_editTextPos.x, (REAL)g_editTextPos.y), &cursorBound);
+            } else {
+                cursorBound = RectF((REAL)g_editTextPos.x, (REAL)g_editTextPos.y, 0, (REAL)(fontSize + 8));
+            }
+            
+            // 绘制闪烁光标竖线
+            DWORD tick = GetTickCount();
+            if ((tick / 500) % 2 == 0) {
+                Pen cursorPen(g_currentColor, 2.0f);
+                float cx = cursorBound.X + cursorBound.Width;
+                float cy = cursorBound.Y + 2;
+                float ch = cursorBound.Height - 4;
+                g.DrawLine(&cursorPen, cx, cy, cx, cy + ch);
+            }
+            
+            // 绘制输入框虚线边框
+            Pen inputBorderPen(Color(150, 0, 174, 255), 1.0f);
+            inputBorderPen.SetDashStyle(DashStyleDash);
+            float bx = cursorBound.X - 4;
+            float by = cursorBound.Y - 2;
+            float bw = max(cursorBound.Width + 12.0f, 40.0f);
+            float bh = cursorBound.Height + 4;
+            g.DrawRectangle(&inputBorderPen, bx, by, bw, bh);
         }
         
         // 绘制正在拖拽绘制中的临时图形
@@ -1271,7 +1354,13 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
             pt.x = LOWORD(lParam);
             pt.y = HIWORD(lParam);
             
-            if (g_isDrawingShape) {
+            if (g_isDraggingText && g_draggingTextIndex >= 0 && g_draggingTextIndex < (int)g_shapes.size()) {
+                g_shapes[g_draggingTextIndex].start.x = pt.x - g_textDragOffset.x;
+                g_shapes[g_draggingTextIndex].start.y = pt.y - g_textDragOffset.y;
+                g_shapes[g_draggingTextIndex].end = g_shapes[g_draggingTextIndex].start;
+                InvalidateRect(hWnd, NULL, FALSE);
+            }
+            else if (g_isDrawingShape) {
                 g_tempShape.end = pt;
                 InvalidateRect(hWnd, NULL, FALSE);
             }
@@ -1497,7 +1586,24 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
                     int btn = clickedBtn;
                     g_overlay.hoveredButton = clickedBtn; // 同步高亮状态
                     
+                    // 切换标注模式时，先提交正在编辑的文字
+                    auto finalizeEditingText = [&]() {
+                        if (g_isEditingText && !g_editingText.empty()) {
+                            DrawingShape textShape;
+                            textShape.type = SHAPE_TEXT;
+                            textShape.start = g_editTextPos;
+                            textShape.end = g_editTextPos;
+                            textShape.color = g_currentColor;
+                            textShape.thickness = g_currentThickness;
+                            textShape.text = g_editingText;
+                            g_shapes.push_back(textShape);
+                        }
+                        g_isEditingText = false;
+                        g_editingText = L"";
+                    };
+                    
                     if (btn == 1) { // 矩形
+                        finalizeEditingText();
                         if (g_annotationMode == ANNOTATION_RECTANGLE) {
                             g_annotationMode = ANNOTATION_NONE;
                         } else {
@@ -1506,6 +1612,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
                         InvalidateRect(hWnd, NULL, FALSE);
                     }
                     else if (btn == 2) { // 箭头
+                        finalizeEditingText();
                         if (g_annotationMode == ANNOTATION_ARROW) {
                             g_annotationMode = ANNOTATION_NONE;
                         } else {
@@ -1513,13 +1620,26 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
                         }
                         InvalidateRect(hWnd, NULL, FALSE);
                     }
-                    else if (btn == 3) { // 撤销
-                        if (!g_shapes.empty()) {
-                            g_shapes.pop_back();
-                            InvalidateRect(hWnd, NULL, FALSE);
+                    else if (btn == 3) { // 文字
+                        finalizeEditingText();
+                        if (g_annotationMode == ANNOTATION_TEXT) {
+                            g_annotationMode = ANNOTATION_NONE;
+                        } else {
+                            g_annotationMode = ANNOTATION_TEXT;
                         }
+                        InvalidateRect(hWnd, NULL, FALSE);
                     }
-                    else if (btn == 4) { // 确定
+                    else if (btn == 4) { // 撤销
+                        if (g_isEditingText) {
+                            g_isEditingText = false;
+                            g_editingText = L"";
+                        } else if (!g_shapes.empty()) {
+                            g_shapes.pop_back();
+                        }
+                        InvalidateRect(hWnd, NULL, FALSE);
+                    }
+                    else if (btn == 5) { // 确定
+                        finalizeEditingText();
                         HBITMAP hBmp = CropScreenCapture(g_overlay.selection);
                         if (hBmp) {
                             CopyBitmapToClipboard(hBmp);
@@ -1527,12 +1647,12 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
                         }
                         SendMessage(hWnd, WM_CLOSE, 0, 0);
                     } 
-                    else if (btn == 5) { // 保存
+                    else if (btn == 6) { // 保存
+                        finalizeEditingText();
                         HBITMAP hBmp = CropScreenCapture(g_overlay.selection);
                         if (hBmp) {
-                            CopyBitmapToClipboard(hBmp); // 默认也入剪贴板
+                            CopyBitmapToClipboard(hBmp);
                             
-                            // 打开保存对话框
                             OPENFILENAME ofn = { 0 };
                             wchar_t fileSz[MAX_PATH] = L"screenshot.png";
                             ofn.lStructSize = sizeof(ofn);
@@ -1550,7 +1670,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
                         }
                         SendMessage(hWnd, WM_CLOSE, 0, 0);
                     }
-                    else if (btn == 6) { // 取消
+                    else if (btn == 7) { // 取消
                         SendMessage(hWnd, WM_CLOSE, 0, 0);
                     }
                     break; // 拦截消息，不往下处理
@@ -1561,15 +1681,61 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
                     break;
                 }
                 
-                // 5. 如果处于标注模式，且在选区内：开始绘制相应的标注图形
+                // 5. 如果处于标注模式，且在选区内
                 if (g_annotationMode != ANNOTATION_NONE && PtInRect(&g_overlay.selection, pt)) {
-                    g_isDrawingShape = true;
-                    g_tempShape.type = (g_annotationMode == ANNOTATION_ARROW) ? SHAPE_ARROW : SHAPE_RECTANGLE;
-                    g_tempShape.start = pt;
-                    g_tempShape.end = pt;
-                    g_tempShape.color = g_currentColor;
-                    g_tempShape.thickness = g_currentThickness;
-                    SetCapture(hWnd);
+                    if (g_annotationMode == ANNOTATION_TEXT) {
+                        // 文字模式：检查是否点击在已有文字上（拖动）
+                        bool hitExistingText = false;
+                        HDC tmpDC = GetDC(hWnd);
+                        Graphics tmpG(tmpDC);
+                        for (int i = (int)g_shapes.size() - 1; i >= 0; --i) {
+                            if (g_shapes[i].type == SHAPE_TEXT && !g_shapes[i].text.empty()) {
+                                int fs = ThicknessToFontSize(g_shapes[i].thickness);
+                                Font tmpFont(L"Microsoft YaHei", (REAL)fs, FontStyleBold);
+                                RectF bounds;
+                                tmpG.MeasureString(g_shapes[i].text.c_str(), -1, &tmpFont, PointF((REAL)g_shapes[i].start.x, (REAL)g_shapes[i].start.y), &bounds);
+                                RECT textRect = { (int)bounds.X - 4, (int)bounds.Y - 4, (int)(bounds.X + bounds.Width) + 4, (int)(bounds.Y + bounds.Height) + 4 };
+                                if (PtInRect(&textRect, pt)) {
+                                    g_isDraggingText = true;
+                                    g_draggingTextIndex = i;
+                                    g_textDragOffset.x = pt.x - g_shapes[i].start.x;
+                                    g_textDragOffset.y = pt.y - g_shapes[i].start.y;
+                                    SetCapture(hWnd);
+                                    hitExistingText = true;
+                                    break;
+                                }
+                            }
+                        }
+                        ReleaseDC(hWnd, tmpDC);
+                        
+                        if (!hitExistingText) {
+                            // 提交上一次编辑中的文字
+                            if (g_isEditingText && !g_editingText.empty()) {
+                                DrawingShape textShape;
+                                textShape.type = SHAPE_TEXT;
+                                textShape.start = g_editTextPos;
+                                textShape.end = g_editTextPos;
+                                textShape.color = g_currentColor;
+                                textShape.thickness = g_currentThickness;
+                                textShape.text = g_editingText;
+                                g_shapes.push_back(textShape);
+                            }
+                            // 在点击位置开始新的文字输入
+                            g_isEditingText = true;
+                            g_editingText = L"";
+                            g_editTextPos = pt;
+                            InvalidateRect(hWnd, NULL, FALSE);
+                        }
+                    } else {
+                        // 箭头/矩形模式
+                        g_isDrawingShape = true;
+                        g_tempShape.type = (g_annotationMode == ANNOTATION_ARROW) ? SHAPE_ARROW : SHAPE_RECTANGLE;
+                        g_tempShape.start = pt;
+                        g_tempShape.end = pt;
+                        g_tempShape.color = g_currentColor;
+                        g_tempShape.thickness = g_currentThickness;
+                        SetCapture(hWnd);
+                    }
                 } else {
                     // 检查是否点在控制手柄上以缩放或平移
                     ResizeHandle h = GetHandleAtPoint(g_overlay.selection, pt);
@@ -1594,7 +1760,13 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
             break;
         }
         case WM_LBUTTONUP: {
-            if (g_isDrawingShape) {
+            if (g_isDraggingText) {
+                g_isDraggingText = false;
+                g_draggingTextIndex = -1;
+                ReleaseCapture();
+                InvalidateRect(hWnd, NULL, FALSE);
+            }
+            else if (g_isDrawingShape) {
                 g_isDrawingShape = false;
                 ReleaseCapture();
                 
@@ -1660,8 +1832,52 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
             break;
         }
         case WM_KEYDOWN: {
+            if (g_isEditingText) {
+                if (wParam == VK_BACK) {
+                    if (!g_editingText.empty()) {
+                        g_editingText.pop_back();
+                        InvalidateRect(hWnd, NULL, FALSE);
+                    }
+                } else if (wParam == VK_RETURN) {
+                    // 回车确认文字
+                    if (!g_editingText.empty()) {
+                        DrawingShape textShape;
+                        textShape.type = SHAPE_TEXT;
+                        textShape.start = g_editTextPos;
+                        textShape.end = g_editTextPos;
+                        textShape.color = g_currentColor;
+                        textShape.thickness = g_currentThickness;
+                        textShape.text = g_editingText;
+                        g_shapes.push_back(textShape);
+                    }
+                    g_isEditingText = false;
+                    g_editingText = L"";
+                    InvalidateRect(hWnd, NULL, FALSE);
+                } else if (wParam == VK_ESCAPE) {
+                    g_isEditingText = false;
+                    g_editingText = L"";
+                    InvalidateRect(hWnd, NULL, FALSE);
+                }
+                break;
+            }
             if (wParam == VK_ESCAPE) {
                 SendMessage(hWnd, WM_CLOSE, 0, 0);
+            }
+            break;
+        }
+        case WM_CHAR: {
+            if (g_isEditingText) {
+                wchar_t ch = (wchar_t)wParam;
+                if (ch >= 32 && ch != 127) {
+                    g_editingText += ch;
+                    InvalidateRect(hWnd, NULL, FALSE);
+                }
+            }
+            break;
+        }
+        case WM_TIMER: {
+            if (wParam == 1 && g_isEditingText) {
+                InvalidateRect(hWnd, NULL, FALSE);
             }
             break;
         }
@@ -1673,8 +1889,13 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
             g_overlay.isSelecting = false;
             g_overlay.isResizing = false;
             g_isDrawingShape = false;
-            g_shapes.clear(); // 清空标注图形
+            g_isEditingText = false;
+            g_editingText = L"";
+            g_isDraggingText = false;
+            g_draggingTextIndex = -1;
+            g_shapes.clear();
             g_annotationMode = ANNOTATION_NONE;
+            KillTimer(hWnd, 1);
             DestroyWindow(hWnd);
             g_hWndOverlay = NULL;
             
@@ -1806,6 +2027,7 @@ void TriggerCapture() {
     ShowWindow(g_hWndOverlay, SW_SHOW);
     UpdateWindow(g_hWndOverlay);
     SetForegroundWindow(g_hWndOverlay);
+    SetTimer(g_hWndOverlay, 1, 500, NULL); // 500ms cursor blink timer
 }
 
 // ========== 托盘自启动右键菜单刷新函数 ==========
