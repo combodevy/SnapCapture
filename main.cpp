@@ -115,6 +115,10 @@ struct DrawingShape {
     Color color;
     int thickness;
     wstring text;
+    float angle = 0.0f;
+    float scale = 1.0f;
+    float origW = 0.0f;
+    float origH = 0.0f;
 };
 
 AnnotationMode g_annotationMode = ANNOTATION_NONE;
@@ -134,6 +138,16 @@ int g_draggingTextIndex = -1;
 POINT g_textDragOffset = { 0, 0 };
 bool g_isDraggingText = false;
 int g_selectedTextIndex = -1;
+
+bool g_isRotatingText = false;
+int g_rotatingTextIndex = -1;
+float g_initialMouseAngle = 0.0f;
+float g_initialTextAngle = 0.0f;
+
+bool g_isResizingText = false;
+int g_resizingTextIndex = -1;
+float g_initialMouseDist = 0.0f;
+float g_initialTextScale = 1.0f;
 
 int ThicknessToFontSize(int thickness) {
     return 8 + thickness * 3;
@@ -824,11 +838,33 @@ HBITMAP CropScreenCapture(const RECT& sel) {
                 int rh = abs(startY - endY);
                 g.DrawRectangle(&pen, rx, ry, rw, rh);
             } else if (shp.type == SHAPE_TEXT && !shp.text.empty()) {
-                int fontSize = ThicknessToFontSize(shp.thickness);
-                Font txtFont(L"Microsoft YaHei", (REAL)fontSize, FontStyleBold);
+                int fs = ThicknessToFontSize(shp.thickness);
+                Font txtFont(L"Microsoft YaHei", (REAL)fs, FontStyleBold);
+                
+                // 确保有尺寸缓存
+                float ow = shp.origW;
+                float oh = shp.origH;
+                if (ow == 0.0f) {
+                    RectF bounds;
+                    g.MeasureString(shp.text.c_str(), -1, &txtFont, PointF(0, 0), &bounds);
+                    ow = bounds.Width;
+                    oh = bounds.Height;
+                }
+                
                 SolidBrush txtBrush(shp.color);
+                
+                float cx = (shp.start.x + shp.end.x) / 2.0f - x1;
+                float cy = (shp.start.y + shp.end.y) / 2.0f - y1;
+                
+                GraphicsState state = g.Save();
                 g.SetTextRenderingHint(TextRenderingHintAntiAlias);
-                g.DrawString(shp.text.c_str(), -1, &txtFont, PointF((REAL)startX, (REAL)startY), &txtBrush);
+                g.TranslateTransform(cx, cy);
+                g.RotateTransform(shp.angle);
+                g.ScaleTransform(shp.scale, shp.scale);
+                
+                g.DrawString(shp.text.c_str(), -1, &txtFont, PointF(-ow / 2.0f, -oh / 2.0f), &txtBrush);
+                
+                g.Restore(state);
             }
         }
     }
@@ -982,7 +1018,7 @@ void DrawOverlay(HWND hWnd, HDC hdc) {
         BitBlt(hMemDC, sel.left, sel.top, sel.right - sel.left, sel.bottom - sel.top, g_hCaptureSourceDC, sel.left, sel.top, SRCCOPY);
         
         // 绘制所有已画好的标注图形 (包括箭头、矩形框、文字)
-        for (const auto& shp : g_shapes) {
+        for (auto& shp : g_shapes) {
             Pen pen(shp.color, (REAL)shp.thickness);
             if (shp.type == SHAPE_ARROW) {
                 AdjustableArrowCap arrowCap(3.5f, 4.0f, TRUE);
@@ -995,26 +1031,77 @@ void DrawOverlay(HWND hWnd, HDC hdc) {
                 int rh = abs(shp.start.y - shp.end.y);
                 g.DrawRectangle(&pen, rx, ry, rw, rh);
             } else if (shp.type == SHAPE_TEXT && !shp.text.empty()) {
-                int fontSize = ThicknessToFontSize(shp.thickness);
-                Font txtFont(L"Microsoft YaHei", (REAL)fontSize, FontStyleBold);
+                int fs = ThicknessToFontSize(shp.thickness);
+                Font txtFont(L"Microsoft YaHei", (REAL)fs, FontStyleBold);
+                if (shp.origW == 0.0f) {
+                    RectF bounds;
+                    g.MeasureString(shp.text.c_str(), -1, &txtFont, PointF(0, 0), &bounds);
+                    shp.origW = bounds.Width;
+                    shp.origH = bounds.Height;
+                    shp.end.x = shp.start.x + (int)bounds.Width;
+                    shp.end.y = shp.start.y + (int)bounds.Height;
+                }
+                
                 SolidBrush txtBrush(shp.color);
+                float cx = (shp.start.x + shp.end.x) / 2.0f;
+                float cy = (shp.start.y + shp.end.y) / 2.0f;
+                
+                GraphicsState state = g.Save();
                 g.SetTextRenderingHint(TextRenderingHintAntiAlias);
-                g.DrawString(shp.text.c_str(), -1, &txtFont, PointF((REAL)shp.start.x, (REAL)shp.start.y), &txtBrush);
+                g.TranslateTransform(cx, cy);
+                g.RotateTransform(shp.angle);
+                g.ScaleTransform(shp.scale, shp.scale);
+                
+                g.DrawString(shp.text.c_str(), -1, &txtFont, PointF(-shp.origW / 2.0f, -shp.origH / 2.0f), &txtBrush);
+                
+                g.Restore(state);
             }
         }
         
-        // 绘制当前选中的文字的虚线外框 (方正极简现代品牌蓝)
+        // 绘制当前选中的文字的虚线外框与旋转/缩放手柄 (方正极简现代品牌蓝)
         if (g_selectedTextIndex >= 0 && g_selectedTextIndex < (int)g_shapes.size()) {
             const auto& shp = g_shapes[g_selectedTextIndex];
-            if (shp.type == SHAPE_TEXT && !shp.text.empty()) {
-                int fs = ThicknessToFontSize(shp.thickness);
-                Font txtFont(L"Microsoft YaHei", (REAL)fs, FontStyleBold);
-                RectF bounds;
-                g.MeasureString(shp.text.c_str(), -1, &txtFont, PointF((REAL)shp.start.x, (REAL)shp.start.y), &bounds);
+            if (shp.type == SHAPE_TEXT && !shp.text.empty() && shp.origW > 0.0f) {
+                float cx = (shp.start.x + shp.end.x) / 2.0f;
+                float cy = (shp.start.y + shp.end.y) / 2.0f;
                 
-                Pen selectBorderPen(Color(255, 0, 174, 255), 1.0f);
+                GraphicsState state = g.Save();
+                g.TranslateTransform(cx, cy);
+                g.RotateTransform(shp.angle);
+                g.ScaleTransform(shp.scale, shp.scale);
+                
+                // 1. 绘制虚线选框
+                Pen selectBorderPen(Color(255, 0, 174, 255), 1.0f / shp.scale);
                 selectBorderPen.SetDashStyle(DashStyleDash);
-                g.DrawRectangle(&selectBorderPen, bounds.X - 4, bounds.Y - 2, bounds.Width + 8, bounds.Height + 4);
+                g.DrawRectangle(&selectBorderPen, -shp.origW / 2.0f - 4, -shp.origH / 2.0f - 2, shp.origW + 8, shp.origH + 4);
+                
+                // 2. 绘制 3 个缩放手柄 (TL, TR, BL)
+                float handleSize = 6.0f / shp.scale;
+                float hs = handleSize / 2.0f;
+                SolidBrush handleBrush(Color(255, 0, 174, 255));
+                Pen whitePen(Color(255, 255, 255), 1.0f / shp.scale);
+                
+                g.FillRectangle(&handleBrush, -shp.origW/2.0f - 4 - hs, -shp.origH/2.0f - 2 - hs, handleSize, handleSize);
+                g.DrawRectangle(&whitePen, -shp.origW/2.0f - 4 - hs, -shp.origH/2.0f - 2 - hs, handleSize, handleSize);
+                
+                g.FillRectangle(&handleBrush, shp.origW/2.0f + 4 - hs, -shp.origH/2.0f - 2 - hs, handleSize, handleSize);
+                g.DrawRectangle(&whitePen, shp.origW/2.0f + 4 - hs, -shp.origH/2.0f - 2 - hs, handleSize, handleSize);
+                
+                g.FillRectangle(&handleBrush, -shp.origW/2.0f - 4 - hs, shp.origH/2.0f + 2 - hs, handleSize, handleSize);
+                g.DrawRectangle(&whitePen, -shp.origW/2.0f - 4 - hs, shp.origH/2.0f + 2 - hs, handleSize, handleSize);
+                
+                // 3. 绘制右下角 (BR) 旋转圈 handle (小圆圈)
+                float circleRadius = 5.0f / shp.scale;
+                float rx = shp.origW / 2.0f + 8.0f;
+                float ry = shp.origH / 2.0f + 6.0f;
+                
+                g.DrawLine(&whitePen, shp.origW/2.0f + 4, shp.origH/2.0f + 2, rx, ry);
+                
+                SolidBrush circleBrush(Color(255, 0, 174, 255));
+                g.FillEllipse(&circleBrush, rx - circleRadius, ry - circleRadius, circleRadius * 2, circleRadius * 2);
+                g.DrawEllipse(&whitePen, rx - circleRadius, ry - circleRadius, circleRadius * 2, circleRadius * 2);
+                
+                g.Restore(state);
             }
         }
         
@@ -1368,10 +1455,39 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
             pt.x = LOWORD(lParam);
             pt.y = HIWORD(lParam);
             
-            if (g_isDraggingText && g_draggingTextIndex >= 0 && g_draggingTextIndex < (int)g_shapes.size()) {
-                g_shapes[g_draggingTextIndex].start.x = pt.x - g_textDragOffset.x;
-                g_shapes[g_draggingTextIndex].start.y = pt.y - g_textDragOffset.y;
-                g_shapes[g_draggingTextIndex].end = g_shapes[g_draggingTextIndex].start;
+            if (g_isRotatingText && g_rotatingTextIndex >= 0 && g_rotatingTextIndex < (int)g_shapes.size()) {
+                auto& shp = g_shapes[g_rotatingTextIndex];
+                float cx = (shp.start.x + shp.end.x) / 2.0f;
+                float cy = (shp.start.y + shp.end.y) / 2.0f;
+                float currentMouseAngle = atan2(pt.y - cy, pt.x - cx) * 180.0f / 3.14159265f;
+                shp.angle = g_initialTextAngle + (currentMouseAngle - g_initialMouseAngle);
+                InvalidateRect(hWnd, NULL, FALSE);
+            }
+            else if (g_isResizingText && g_resizingTextIndex >= 0 && g_resizingTextIndex < (int)g_shapes.size()) {
+                auto& shp = g_shapes[g_resizingTextIndex];
+                float cx = (shp.start.x + shp.end.x) / 2.0f;
+                float cy = (shp.start.y + shp.end.y) / 2.0f;
+                float currentMouseDist = sqrt((pt.x - cx) * (pt.x - cx) + (pt.y - cy) * (pt.y - cy));
+                if (g_initialMouseDist > 0.0f) {
+                    float newScale = g_initialTextScale * (currentMouseDist / g_initialMouseDist);
+                    shp.scale = max(0.1f, min(15.0f, newScale));
+                    
+                    // 等比例缩放端点
+                    shp.start.x = (int)(cx - (shp.origW / 2.0f) * shp.scale);
+                    shp.start.y = (int)(cy - (shp.origH / 2.0f) * shp.scale);
+                    shp.end.x = (int)(cx + (shp.origW / 2.0f) * shp.scale);
+                    shp.end.y = (int)(cy + (shp.origH / 2.0f) * shp.scale);
+                }
+                InvalidateRect(hWnd, NULL, FALSE);
+            }
+            else if (g_isDraggingText && g_draggingTextIndex >= 0 && g_draggingTextIndex < (int)g_shapes.size()) {
+                auto& shp = g_shapes[g_draggingTextIndex];
+                int w = shp.end.x - shp.start.x;
+                int h = shp.end.y - shp.start.y;
+                shp.start.x = pt.x - g_textDragOffset.x;
+                shp.start.y = pt.y - g_textDragOffset.y;
+                shp.end.x = shp.start.x + w;
+                shp.end.y = shp.start.y + h;
                 InvalidateRect(hWnd, NULL, FALSE);
             }
             else if (g_isDrawingShape) {
@@ -1710,35 +1826,111 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
                 // 5. 如果处于标注模式，且在选区内
                 if (g_annotationMode != ANNOTATION_NONE && PtInRect(&g_overlay.selection, pt)) {
                     if (g_annotationMode == ANNOTATION_TEXT) {
-                        // 文字模式：检查是否点击在已有文字上（拖动/选择）
+                        // 文字模式：检查是否点击在已有文字上（拖动/旋转/缩放/选择）
                         bool hitExistingText = false;
-                        HDC tmpDC = GetDC(hWnd);
-                        Graphics tmpG(tmpDC);
                         for (int i = (int)g_shapes.size() - 1; i >= 0; --i) {
-                            if (g_shapes[i].type == SHAPE_TEXT && !g_shapes[i].text.empty()) {
-                                int fs = ThicknessToFontSize(g_shapes[i].thickness);
-                                Font tmpFont(L"Microsoft YaHei", (REAL)fs, FontStyleBold);
-                                RectF bounds;
-                                tmpG.MeasureString(g_shapes[i].text.c_str(), -1, &tmpFont, PointF((REAL)g_shapes[i].start.x, (REAL)g_shapes[i].start.y), &bounds);
-                                RECT textRect = { (int)bounds.X - 4, (int)bounds.Y - 4, (int)(bounds.X + bounds.Width) + 4, (int)(bounds.Y + bounds.Height) + 4 };
-                                if (PtInRect(&textRect, pt)) {
+                            auto& shp = g_shapes[i];
+                            if (shp.type == SHAPE_TEXT && !shp.text.empty()) {
+                                // 必须有已初始化的宽度和高度
+                                if (shp.origW == 0.0f) {
+                                    HDC tmpDC = GetDC(hWnd);
+                                    Graphics tmpG(tmpDC);
+                                    int fs = ThicknessToFontSize(shp.thickness);
+                                    Font tmpFont(L"Microsoft YaHei", (REAL)fs, FontStyleBold);
+                                    RectF bounds;
+                                    tmpG.MeasureString(shp.text.c_str(), -1, &tmpFont, PointF(0, 0), &bounds);
+                                    shp.origW = bounds.Width;
+                                    shp.origH = bounds.Height;
+                                    shp.end.x = shp.start.x + (int)bounds.Width;
+                                    shp.end.y = shp.start.y + (int)bounds.Height;
+                                    ReleaseDC(hWnd, tmpDC);
+                                }
+                                
+                                float cx = (shp.start.x + shp.end.x) / 2.0f;
+                                float cy = (shp.start.y + shp.end.y) / 2.0f;
+                                
+                                // A. 检查旋转手柄 (BR 旋转小圆圈)
+                                float rotLocalX = shp.origW / 2.0f + 8.0f;
+                                float rotLocalY = shp.origH / 2.0f + 6.0f;
+                                float radBack = shp.angle * 3.14159265f / 180.0f;
+                                float scaledRotX = rotLocalX * shp.scale;
+                                float scaledRotY = rotLocalY * shp.scale;
+                                float rotScreenX = cx + (scaledRotX * cos(radBack) - scaledRotY * sin(radBack));
+                                float rotScreenY = cy + (scaledRotX * sin(radBack) + scaledRotY * cos(radBack));
+                                
+                                float distR = sqrt((pt.x - rotScreenX) * (pt.x - rotScreenX) + (pt.y - rotScreenY) * (pt.y - rotScreenY));
+                                if (distR <= 10.0f) {
+                                    g_isRotatingText = true;
+                                    g_rotatingTextIndex = i;
+                                    g_selectedTextIndex = i;
+                                    g_currentColor = shp.color;
+                                    g_currentThickness = shp.thickness;
+                                    g_initialMouseAngle = atan2(pt.y - cy, pt.x - cx) * 180.0f / 3.14159265f;
+                                    g_initialTextAngle = shp.angle;
+                                    SetCapture(hWnd);
+                                    hitExistingText = true;
+                                    break;
+                                }
+                                
+                                // B. 检查 3 个角上的缩放手柄 (TL, TR, BL)
+                                auto getScreenPt = [&](float lx, float ly) -> POINT {
+                                    float sx = lx * shp.scale;
+                                    float sy = ly * shp.scale;
+                                    POINT res;
+                                    res.x = (int)(cx + (sx * cos(radBack) - sy * sin(radBack)));
+                                    res.y = (int)(cy + (sx * sin(radBack) + sy * cos(radBack)));
+                                    return res;
+                                };
+                                
+                                POINT ptsCorners[] = {
+                                    getScreenPt(-shp.origW/2.0f - 4.0f, -shp.origH/2.0f - 2.0f), // TL
+                                    getScreenPt(shp.origW/2.0f + 4.0f, -shp.origH/2.0f - 2.0f),  // TR
+                                    getScreenPt(-shp.origW/2.0f - 4.0f, shp.origH/2.0f + 2.0f)   // BL
+                                };
+                                
+                                bool hitResize = false;
+                                for (int k = 0; k < 3; ++k) {
+                                    float distC = sqrt((pt.x - ptsCorners[k].x) * (pt.x - ptsCorners[k].x) + (pt.y - ptsCorners[k].y) * (pt.y - ptsCorners[k].y));
+                                    if (distC <= 10.0f) {
+                                        g_isResizingText = true;
+                                        g_resizingTextIndex = i;
+                                        g_selectedTextIndex = i;
+                                        g_currentColor = shp.color;
+                                        g_currentThickness = shp.thickness;
+                                        g_initialMouseDist = sqrt((pt.x - cx) * (pt.x - cx) + (pt.y - cy) * (pt.y - cy));
+                                        g_initialTextScale = shp.scale;
+                                        SetCapture(hWnd);
+                                        hitExistingText = true;
+                                        hitResize = true;
+                                        break;
+                                    }
+                                }
+                                if (hitResize) break;
+                                
+                                // C. 检查是否点击在文字矩形内部
+                                float dx = pt.x - cx;
+                                float dy = pt.y - cy;
+                                float rad = -shp.angle * 3.14159265f / 180.0f;
+                                float localX = (dx * cos(rad) - dy * sin(rad)) / shp.scale;
+                                float localY = (dx * sin(rad) + dy * cos(rad)) / shp.scale;
+                                
+                                if (localX >= -shp.origW/2.0f - 6.0f && localX <= shp.origW/2.0f + 6.0f &&
+                                    localY >= -shp.origH/2.0f - 4.0f && localY <= shp.origH/2.0f + 4.0f) {
                                     g_isDraggingText = true;
                                     g_draggingTextIndex = i;
-                                    g_selectedTextIndex = i; // 选中该文字
+                                    g_selectedTextIndex = i;
                                     
-                                    // 同步当前颜色与粗细设置
-                                    g_currentColor = g_shapes[i].color;
-                                    g_currentThickness = g_shapes[i].thickness;
+                                    g_currentColor = shp.color;
+                                    g_currentThickness = shp.thickness;
                                     
-                                    g_textDragOffset.x = pt.x - g_shapes[i].start.x;
-                                    g_textDragOffset.y = pt.y - g_shapes[i].start.y;
+                                    g_textDragOffset.x = pt.x - shp.start.x;
+                                    g_textDragOffset.y = pt.y - shp.start.y;
                                     SetCapture(hWnd);
                                     hitExistingText = true;
                                     break;
                                 }
                             }
                         }
-                        ReleaseDC(hWnd, tmpDC);
                         
                         if (!hitExistingText) {
                             // 提交上一次编辑中的文字
@@ -1803,7 +1995,19 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
             break;
         }
         case WM_LBUTTONUP: {
-            if (g_isDraggingText) {
+            if (g_isRotatingText) {
+                g_isRotatingText = false;
+                g_rotatingTextIndex = -1;
+                ReleaseCapture();
+                InvalidateRect(hWnd, NULL, FALSE);
+            }
+            else if (g_isResizingText) {
+                g_isResizingText = false;
+                g_resizingTextIndex = -1;
+                ReleaseCapture();
+                InvalidateRect(hWnd, NULL, FALSE);
+            }
+            else if (g_isDraggingText) {
                 g_isDraggingText = false;
                 g_draggingTextIndex = -1;
                 ReleaseCapture();
@@ -1960,6 +2164,10 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
             g_isDraggingText = false;
             g_draggingTextIndex = -1;
             g_selectedTextIndex = -1;
+            g_isRotatingText = false;
+            g_rotatingTextIndex = -1;
+            g_isResizingText = false;
+            g_resizingTextIndex = -1;
             g_shapes.clear();
             g_annotationMode = ANNOTATION_NONE;
             KillTimer(hWnd, 1);
@@ -2082,6 +2290,10 @@ void TriggerCapture() {
     g_overlay.isPossibleClick = false;
     g_isDrawingShape = false;
     g_selectedTextIndex = -1;
+    g_isRotatingText = false;
+    g_rotatingTextIndex = -1;
+    g_isResizingText = false;
+    g_resizingTextIndex = -1;
     
     g_hWndOverlay = CreateWindowEx(
         WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
