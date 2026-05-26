@@ -119,6 +119,8 @@ struct DrawingShape {
     float scale = 1.0f;
     float origW = 0.0f;
     float origH = 0.0f;
+    float origX = 0.0f;
+    float origY = 0.0f;
 };
 
 AnnotationMode g_annotationMode = ANNOTATION_NONE;
@@ -138,6 +140,8 @@ int g_draggingTextIndex = -1;
 POINT g_textDragOffset = { 0, 0 };
 bool g_isDraggingText = false;
 int g_selectedTextIndex = -1;
+float g_editAngle = 0.0f;
+float g_editScale = 1.0f;
 
 bool g_isRotatingText = false;
 int g_rotatingTextIndex = -1;
@@ -844,11 +848,15 @@ HBITMAP CropScreenCapture(const RECT& sel) {
                 // 确保有尺寸缓存
                 float ow = shp.origW;
                 float oh = shp.origH;
+                float ox = shp.origX;
+                float oy = shp.origY;
                 if (ow == 0.0f) {
                     RectF bounds;
                     g.MeasureString(shp.text.c_str(), -1, &txtFont, PointF(0, 0), &bounds);
                     ow = bounds.Width;
                     oh = bounds.Height;
+                    ox = bounds.X;
+                    oy = bounds.Y;
                 }
                 
                 SolidBrush txtBrush(shp.color);
@@ -862,7 +870,7 @@ HBITMAP CropScreenCapture(const RECT& sel) {
                 g.RotateTransform(shp.angle);
                 g.ScaleTransform(shp.scale, shp.scale);
                 
-                g.DrawString(shp.text.c_str(), -1, &txtFont, PointF(-ow / 2.0f, -oh / 2.0f), &txtBrush);
+                g.DrawString(shp.text.c_str(), -1, &txtFont, PointF(-ow / 2.0f - ox, -oh / 2.0f - oy), &txtBrush);
                 
                 g.Restore(state);
             }
@@ -1038,6 +1046,8 @@ void DrawOverlay(HWND hWnd, HDC hdc) {
                     g.MeasureString(shp.text.c_str(), -1, &txtFont, PointF(0, 0), &bounds);
                     shp.origW = bounds.Width;
                     shp.origH = bounds.Height;
+                    shp.origX = bounds.X;
+                    shp.origY = bounds.Y;
                     shp.end.x = shp.start.x + (int)bounds.Width;
                     shp.end.y = shp.start.y + (int)bounds.Height;
                 }
@@ -1052,7 +1062,7 @@ void DrawOverlay(HWND hWnd, HDC hdc) {
                 g.RotateTransform(shp.angle);
                 g.ScaleTransform(shp.scale, shp.scale);
                 
-                g.DrawString(shp.text.c_str(), -1, &txtFont, PointF(-shp.origW / 2.0f, -shp.origH / 2.0f), &txtBrush);
+                g.DrawString(shp.text.c_str(), -1, &txtFont, PointF(-shp.origW / 2.0f - shp.origX, -shp.origH / 2.0f - shp.origY), &txtBrush);
                 
                 g.Restore(state);
             }
@@ -1114,34 +1124,44 @@ void DrawOverlay(HWND hWnd, HDC hdc) {
             
             wstring displayText = g_editingText;
             if (displayText.empty()) displayText = L" ";
-            g.DrawString(g_editingText.c_str(), -1, &txtFont, PointF((REAL)g_editTextPos.x, (REAL)g_editTextPos.y), &txtBrush);
             
-            // 计算光标位置
             RectF cursorBound;
-            if (!g_editingText.empty()) {
-                g.MeasureString(g_editingText.c_str(), -1, &txtFont, PointF((REAL)g_editTextPos.x, (REAL)g_editTextPos.y), &cursorBound);
-            } else {
-                cursorBound = RectF((REAL)g_editTextPos.x, (REAL)g_editTextPos.y, 0, (REAL)(fontSize + 8));
-            }
+            g.MeasureString(displayText.c_str(), -1, &txtFont, PointF(0, 0), &cursorBound);
+            float ew = cursorBound.Width;
+            float eh = cursorBound.Height;
+            float ex = cursorBound.X;
+            float ey = cursorBound.Y;
+            
+            float cx = g_editTextPos.x + ew / 2.0f;
+            float cy = g_editTextPos.y + eh / 2.0f;
+            
+            GraphicsState state = g.Save();
+            g.TranslateTransform(cx, cy);
+            g.RotateTransform(g_editAngle);
+            g.ScaleTransform(g_editScale, g_editScale);
+            
+            g.DrawString(g_editingText.c_str(), -1, &txtFont, PointF(-ew / 2.0f - ex, -eh / 2.0f - ey), &txtBrush);
             
             // 绘制闪烁光标竖线
             DWORD tick = GetTickCount();
             if ((tick / 500) % 2 == 0) {
-                Pen cursorPen(g_currentColor, 2.0f);
-                float cx = cursorBound.X + cursorBound.Width;
-                float cy = cursorBound.Y + 2;
-                float ch = cursorBound.Height - 4;
-                g.DrawLine(&cursorPen, cx, cy, cx, cy + ch);
+                Pen cursorPen(g_currentColor, 2.0f / g_editScale);
+                float curX = ew / 2.0f;
+                float curY = -eh / 2.0f + 2;
+                float curH = eh - 4;
+                g.DrawLine(&cursorPen, curX, curY, curX, curY + curH);
             }
             
             // 绘制输入框虚线边框
-            Pen inputBorderPen(Color(150, 0, 174, 255), 1.0f);
+            Pen inputBorderPen(Color(150, 0, 174, 255), 1.0f / g_editScale);
             inputBorderPen.SetDashStyle(DashStyleDash);
-            float bx = cursorBound.X - 4;
-            float by = cursorBound.Y - 2;
-            float bw = max(cursorBound.Width + 12.0f, 40.0f);
-            float bh = cursorBound.Height + 4;
+            float bx = -ew / 2.0f - 4;
+            float by = -eh / 2.0f - 2;
+            float bw = max(ew + 12.0f, 40.0f);
+            float bh = eh + 4;
             g.DrawRectangle(&inputBorderPen, bx, by, bw, bh);
+            
+            g.Restore(state);
         }
         
         // 绘制正在拖拽绘制中的临时图形
@@ -1596,8 +1616,97 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
                         RECT stRect = { min_x, max_y + 4, max_x, max_y + 40 };
                         if (PtInRect(&stRect, pt)) { onButton = true; }
                     }
+                    
                     if (onButton) {
                         SetCursor(LoadCursor(NULL, IDC_HAND));
+                    } else if (g_annotationMode == ANNOTATION_TEXT) {
+                        // Check if hovering over any text shape or its handles
+                        bool cursorSet = false;
+                        
+                        // First, if there's a selected text shape, check its handles
+                        if (g_selectedTextIndex >= 0 && g_selectedTextIndex < (int)g_shapes.size()) {
+                            auto& shp = g_shapes[g_selectedTextIndex];
+                            if (shp.type == SHAPE_TEXT && !shp.text.empty() && shp.origW > 0.0f) {
+                                float cx = (shp.start.x + shp.end.x) / 2.0f;
+                                float cy = (shp.start.y + shp.end.y) / 2.0f;
+                                float radBack = shp.angle * 3.14159265f / 180.0f;
+                                
+                                // A. Rotation handle (BR)
+                                float rotLocalX = shp.origW / 2.0f + 8.0f;
+                                float rotLocalY = shp.origH / 2.0f + 6.0f;
+                                float scaledRotX = rotLocalX * shp.scale;
+                                float scaledRotY = rotLocalY * shp.scale;
+                                float rotScreenX = cx + (scaledRotX * cos(radBack) - scaledRotY * sin(radBack));
+                                float rotScreenY = cy + (scaledRotX * sin(radBack) + scaledRotY * cos(radBack));
+                                
+                                float distR = sqrt((pt.x - rotScreenX) * (pt.x - rotScreenX) + (pt.y - rotScreenY) * (pt.y - rotScreenY));
+                                if (distR <= 20.0f) {
+                                    SetCursor(LoadCursor(NULL, IDC_HAND));
+                                    cursorSet = true;
+                                }
+                                
+                                // B. Resize handles (TL, TR, BL)
+                                if (!cursorSet) {
+                                    auto getScreenPt = [&](float lx, float ly) -> POINT {
+                                        float sx = lx * shp.scale;
+                                        float sy = ly * shp.scale;
+                                        POINT res;
+                                        res.x = (int)(cx + (sx * cos(radBack) - sy * sin(radBack)));
+                                        res.y = (int)(cy + (sx * sin(radBack) + sy * cos(radBack)));
+                                        return res;
+                                    };
+                                    
+                                    POINT ptsCorners[] = {
+                                        getScreenPt(-shp.origW/2.0f - 4.0f, -shp.origH/2.0f - 2.0f), // TL
+                                        getScreenPt(shp.origW/2.0f + 4.0f, -shp.origH/2.0f - 2.0f),  // TR
+                                        getScreenPt(-shp.origW/2.0f - 4.0f, shp.origH/2.0f + 2.0f)   // BL
+                                    };
+                                    
+                                    HCURSOR cursors[] = {
+                                        LoadCursor(NULL, IDC_SIZENWSE), // TL
+                                        LoadCursor(NULL, IDC_SIZENESW), // TR
+                                        LoadCursor(NULL, IDC_SIZENESW)  // BL
+                                    };
+                                    
+                                    for (int k = 0; k < 3; ++k) {
+                                        float distC = sqrt((pt.x - ptsCorners[k].x) * (pt.x - ptsCorners[k].x) + (pt.y - ptsCorners[k].y) * (pt.y - ptsCorners[k].y));
+                                        if (distC <= 20.0f) {
+                                            SetCursor(cursors[k]);
+                                            cursorSet = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        
+                        // C. Check text body (for all text shapes)
+                        if (!cursorSet) {
+                            for (int i = (int)g_shapes.size() - 1; i >= 0; --i) {
+                                auto& shp = g_shapes[i];
+                                if (shp.type == SHAPE_TEXT && !shp.text.empty() && shp.origW > 0.0f) {
+                                    float cx = (shp.start.x + shp.end.x) / 2.0f;
+                                    float cy = (shp.start.y + shp.end.y) / 2.0f;
+                                    
+                                    float dx = pt.x - cx;
+                                    float dy = pt.y - cy;
+                                    float rad = -shp.angle * 3.14159265f / 180.0f;
+                                    float localX = (dx * cos(rad) - dy * sin(rad)) / shp.scale;
+                                    float localY = (dx * sin(rad) + dy * cos(rad)) / shp.scale;
+                                    
+                                    if (localX >= -shp.origW/2.0f - 6.0f && localX <= shp.origW/2.0f + 6.0f &&
+                                        localY >= -shp.origH/2.0f - 4.0f && localY <= shp.origH/2.0f + 4.0f) {
+                                        SetCursor(LoadCursor(NULL, IDC_SIZEALL));
+                                        cursorSet = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        
+                        if (!cursorSet) {
+                            SetCursor(LoadCursor(NULL, IDC_CROSS));
+                        }
                     } else {
                         SetCursor(LoadCursor(NULL, IDC_CROSS));
                     }
@@ -1619,6 +1728,81 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
                 if (hovered != g_overlay.hoveredButton) {
                     g_overlay.hoveredButton = hovered;
                     InvalidateRect(hWnd, NULL, FALSE);
+                }
+            }
+            break;
+        }
+        case WM_LBUTTONDBLCLK: {
+            POINT pt;
+            pt.x = LOWORD(lParam);
+            pt.y = HIWORD(lParam);
+            
+            if (g_annotationMode == ANNOTATION_TEXT && g_overlay.selectionDone) {
+                // Find if double click is inside an existing text shape
+                for (int i = (int)g_shapes.size() - 1; i >= 0; --i) {
+                    auto& shp = g_shapes[i];
+                    if (shp.type == SHAPE_TEXT && !shp.text.empty()) {
+                        // Measure it first if not measured
+                        if (shp.origW == 0.0f) {
+                            HDC tmpDC = GetDC(hWnd);
+                            Graphics tmpG(tmpDC);
+                            int fs = ThicknessToFontSize(shp.thickness);
+                            Font tmpFont(L"Microsoft YaHei", (REAL)fs, FontStyleBold);
+                            RectF bounds;
+                            tmpG.MeasureString(shp.text.c_str(), -1, &tmpFont, PointF(0, 0), &bounds);
+                            shp.origW = bounds.Width;
+                            shp.origH = bounds.Height;
+                            shp.origX = bounds.X;
+                            shp.origY = bounds.Y;
+                            shp.end.x = shp.start.x + (int)bounds.Width;
+                            shp.end.y = shp.start.y + (int)bounds.Height;
+                            ReleaseDC(hWnd, tmpDC);
+                        }
+                        
+                        float cx = (shp.start.x + shp.end.x) / 2.0f;
+                        float cy = (shp.start.y + shp.end.y) / 2.0f;
+                        
+                        float dx = pt.x - cx;
+                        float dy = pt.y - cy;
+                        float rad = -shp.angle * 3.14159265f / 180.0f;
+                        float localX = (dx * cos(rad) - dy * sin(rad)) / shp.scale;
+                        float localY = (dx * sin(rad) + dy * cos(rad)) / shp.scale;
+                        
+                        if (localX >= -shp.origW/2.0f - 6.0f && localX <= shp.origW/2.0f + 6.0f &&
+                            localY >= -shp.origH/2.0f - 4.0f && localY <= shp.origH/2.0f + 4.0f) {
+                            
+                            // Double clicked this text! Finalize any previous editing text first
+                            if (g_isEditingText && !g_editingText.empty()) {
+                                DrawingShape textShape;
+                                textShape.type = SHAPE_TEXT;
+                                textShape.start = g_editTextPos;
+                                textShape.end = g_editTextPos;
+                                textShape.color = g_currentColor;
+                                textShape.thickness = g_currentThickness;
+                                textShape.text = g_editingText;
+                                textShape.angle = g_editAngle;
+                                textShape.scale = g_editScale;
+                                textShape.origW = 0.0f;
+                                textShape.origH = 0.0f;
+                                g_shapes.push_back(textShape);
+                            }
+                            
+                            g_isEditingText = true;
+                            g_editingText = shp.text;
+                            g_editTextPos = shp.start;
+                            g_editAngle = shp.angle;
+                            g_editScale = shp.scale;
+                            g_currentColor = shp.color;
+                            g_currentThickness = shp.thickness;
+                            
+                            // Remove from static shapes so it becomes editable
+                            g_shapes.erase(g_shapes.begin() + i);
+                            g_selectedTextIndex = -1;
+                            
+                            InvalidateRect(hWnd, NULL, FALSE);
+                            break;
+                        }
+                    }
                 }
             }
             break;
@@ -1732,6 +1916,10 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
                             textShape.color = g_currentColor;
                             textShape.thickness = g_currentThickness;
                             textShape.text = g_editingText;
+                            textShape.angle = g_editAngle;
+                            textShape.scale = g_editScale;
+                            textShape.origW = 0.0f;
+                            textShape.origH = 0.0f;
                             g_shapes.push_back(textShape);
                         }
                         g_isEditingText = false;
@@ -1841,6 +2029,8 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
                                     tmpG.MeasureString(shp.text.c_str(), -1, &tmpFont, PointF(0, 0), &bounds);
                                     shp.origW = bounds.Width;
                                     shp.origH = bounds.Height;
+                                    shp.origX = bounds.X;
+                                    shp.origY = bounds.Y;
                                     shp.end.x = shp.start.x + (int)bounds.Width;
                                     shp.end.y = shp.start.y + (int)bounds.Height;
                                     ReleaseDC(hWnd, tmpDC);
@@ -1859,7 +2049,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
                                 float rotScreenY = cy + (scaledRotX * sin(radBack) + scaledRotY * cos(radBack));
                                 
                                 float distR = sqrt((pt.x - rotScreenX) * (pt.x - rotScreenX) + (pt.y - rotScreenY) * (pt.y - rotScreenY));
-                                if (distR <= 10.0f) {
+                                if (distR <= 20.0f) {
                                     g_isRotatingText = true;
                                     g_rotatingTextIndex = i;
                                     g_selectedTextIndex = i;
@@ -1891,7 +2081,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
                                 bool hitResize = false;
                                 for (int k = 0; k < 3; ++k) {
                                     float distC = sqrt((pt.x - ptsCorners[k].x) * (pt.x - ptsCorners[k].x) + (pt.y - ptsCorners[k].y) * (pt.y - ptsCorners[k].y));
-                                    if (distC <= 10.0f) {
+                                    if (distC <= 20.0f) {
                                         g_isResizingText = true;
                                         g_resizingTextIndex = i;
                                         g_selectedTextIndex = i;
@@ -1942,6 +2132,10 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
                                 textShape.color = g_currentColor;
                                 textShape.thickness = g_currentThickness;
                                 textShape.text = g_editingText;
+                                textShape.angle = g_editAngle;
+                                textShape.scale = g_editScale;
+                                textShape.origW = 0.0f;
+                                textShape.origH = 0.0f;
                                 g_shapes.push_back(textShape);
                             }
                             // 点击空白，清除选择
@@ -1951,6 +2145,8 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
                             g_isEditingText = true;
                             g_editingText = L"";
                             g_editTextPos = pt;
+                            g_editAngle = 0.0f;
+                            g_editScale = 1.0f;
                             InvalidateRect(hWnd, NULL, FALSE);
                         } else {
                             InvalidateRect(hWnd, NULL, FALSE);
@@ -2095,6 +2291,10 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
                         textShape.color = g_currentColor;
                         textShape.thickness = g_currentThickness;
                         textShape.text = g_editingText;
+                        textShape.angle = g_editAngle;
+                        textShape.scale = g_editScale;
+                        textShape.origW = 0.0f;
+                        textShape.origH = 0.0f;
                         g_shapes.push_back(textShape);
                     }
                     g_isEditingText = false;
@@ -2168,6 +2368,8 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
             g_rotatingTextIndex = -1;
             g_isResizingText = false;
             g_resizingTextIndex = -1;
+            g_editAngle = 0.0f;
+            g_editScale = 1.0f;
             g_shapes.clear();
             g_annotationMode = ANNOTATION_NONE;
             KillTimer(hWnd, 1);
@@ -2275,7 +2477,7 @@ void TriggerCapture() {
     // 3. 展现 Overlay 无边框置顶覆盖层
     WNDCLASSEX wcex = { 0 };
     wcex.cbSize = sizeof(WNDCLASSEX);
-    wcex.style = CS_HREDRAW | CS_VREDRAW;
+    wcex.style = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;
     wcex.lpfnWndProc = OverlayWndProc;
     wcex.hInstance = g_hInstance;
     wcex.hCursor = LoadCursor(NULL, IDC_CROSS);
