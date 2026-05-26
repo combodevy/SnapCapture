@@ -1207,26 +1207,45 @@ BOOL IsValidWindow(HWND hWnd) {
     return TRUE;
 }
 
-BOOL GetWindowRectAtPoint(POINT pt, RECT* pRect) {
-    HWND hWndPoint = WindowFromPoint(pt);
-    if (!hWndPoint) return FALSE;
+// EnumWindows Z-order callback: finds the topmost valid window containing the point
+struct FindWindowData {
+    POINT ptScreen;
+    HWND resultHwnd;
+};
+
+BOOL CALLBACK EnumWindowsFindAtPoint(HWND hWnd, LPARAM lParam) {
+    FindWindowData* data = (FindWindowData*)lParam;
     
-    HWND hWndTop = GetAncestor(hWndPoint, GA_ROOT);
-    if (!hWndTop) return FALSE;
-    
-    while (hWndTop && !IsValidWindow(hWndTop)) {
-        hWndTop = GetParent(hWndTop);
-        if (hWndTop) {
-            hWndTop = GetAncestor(hWndTop, GA_ROOT);
-        }
-    }
-    
-    if (!hWndTop) return FALSE;
+    if (!IsValidWindow(hWnd)) return TRUE;
     
     RECT rc;
-    HRESULT hr = DwmGetWindowAttribute(hWndTop, DWMWA_EXTENDED_FRAME_BOUNDS, &rc, sizeof(rc));
+    HRESULT hr = DwmGetWindowAttribute(hWnd, DWMWA_EXTENDED_FRAME_BOUNDS, &rc, sizeof(rc));
     if (FAILED(hr)) {
-        GetWindowRect(hWndTop, &rc);
+        GetWindowRect(hWnd, &rc);
+    }
+    
+    if (data->ptScreen.x >= rc.left && data->ptScreen.x < rc.right &&
+        data->ptScreen.y >= rc.top && data->ptScreen.y < rc.bottom) {
+        data->resultHwnd = hWnd;
+        return FALSE;
+    }
+    
+    return TRUE;
+}
+
+BOOL GetWindowRectAtPoint(POINT pt, RECT* pRect) {
+    FindWindowData data;
+    data.ptScreen = pt;
+    data.resultHwnd = NULL;
+    
+    EnumWindows(EnumWindowsFindAtPoint, (LPARAM)&data);
+    
+    if (!data.resultHwnd) return FALSE;
+    
+    RECT rc;
+    HRESULT hr = DwmGetWindowAttribute(data.resultHwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &rc, sizeof(rc));
+    if (FAILED(hr)) {
+        GetWindowRect(data.resultHwnd, &rc);
     }
     
     pRect->left = rc.left - g_screenX;
@@ -1633,6 +1652,10 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
             }
             break;
         }
+        case WM_RBUTTONDOWN: {
+            SendMessage(hWnd, WM_CLOSE, 0, 0);
+            break;
+        }
         case WM_KEYDOWN: {
             if (wParam == VK_ESCAPE) {
                 SendMessage(hWnd, WM_CLOSE, 0, 0);
@@ -1642,6 +1665,11 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
         case WM_CLOSE: {
             g_overlay.selectionDone = false;
             g_overlay.selection = { 0, 0, 0, 0 };
+            g_overlay.hasDetectedWindow = false;
+            g_overlay.isPossibleClick = false;
+            g_overlay.isSelecting = false;
+            g_overlay.isResizing = false;
+            g_isDrawingShape = false;
             g_shapes.clear(); // 清空标注图形
             g_annotationMode = ANNOTATION_NONE;
             DestroyWindow(hWnd);
@@ -1759,6 +1787,9 @@ void TriggerCapture() {
     g_overlay.selectionDone = false;
     g_overlay.isSelecting = false;
     g_overlay.isResizing = false;
+    g_overlay.hasDetectedWindow = false;
+    g_overlay.isPossibleClick = false;
+    g_isDrawingShape = false;
     
     g_hWndOverlay = CreateWindowEx(
         WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
