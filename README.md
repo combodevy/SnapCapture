@@ -1,5 +1,7 @@
 # SnapCapture (CaptureTool)
 
+[English Version](README_EN.md) | [![TypeScript](https://img.shields.io/badge/TypeScript-007ACC?style=flat-square&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
+
 SnapCapture 是一款基于 C++11、Win32 API 和 GDI/GDI+ 实现的 Windows 轻量级原生截图与标注工具。
 
 ## 项目特点
