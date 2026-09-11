@@ -6,9 +6,14 @@ SnapCapture is a lightweight, native Windows screenshot and annotation tool buil
 
 ## Features
 
-*   **Lightweight & No Dependencies**: Built purely with Win32 SDK and GDI+. Free of third-party UI framework dependencies. Can be statically compiled into a single standalone executable (approx. 2.6 MB).
+*   **Lightweight & No Dependencies**: Built purely with Win32 SDK and GDI+. Free of third-party UI framework dependencies. Can be statically compiled into a single standalone executable (approx. 1.2 MB with symbols stripped).
 *   **Low Resource Footprint**: Uses double-buffered rendering and partial updates. Idle memory footprint is only about 2.5 MB.
 *   **DPI-Aware**: Seamlessly supports system-level High DPI scaling and multi-monitor setups, ensuring crisp screenshot capturing and rendering.
+
+## Download
+
+Prefer not to build it yourself? Grab the latest `CaptureTool.exe` from the
+[Releases page](https://github.com/combodevy/SnapCapture/releases). No installer, and nothing is written outside its own folder.
 
 ## Core Functions
 
@@ -18,13 +23,14 @@ SnapCapture is a lightweight, native Windows screenshot and annotation tool buil
 2.  **Vector Annotation Tools**
     *   **Basic Shapes**: Draw rectangular frames (with custom, persistent round corner radius), ellipses, and vector arrows.
     *   **Properties Adjustment**: Adjust brush thickness (2px, 4px, 8px) and annotation colors via the floating toolbar (with custom color selection).
-    *   **Undo Support**: Provides a stack-based undo mechanism to sequentially retract applied annotations.
+    *   **Undo / Redo**: Step back through applied annotations and redo them again, from either the toolbar button or the keyboard.
 3.  **Text Annotation Engine**
     *   **Inline Editing**: Double-click any text element to edit it directly in-place. Supports arrow keys, Home/End cursor navigation, Backspace/Delete, and custom text insertions.
     *   **Styling & Transforms**: Easily choose font family, font size, bold, and italic options using the Windows ChooseFont dialog. Resize text proportionally via corner handles or rotate text seamlessly from 0° to 360°.
+    *   **IME Input**: Composition strings are rendered inline at the caret with an underline, and the candidate window follows the text caret instead of sticking to a screen corner.
 4.  **System Integration**
     *   **Global Hotkey**: Register a keyboard combination or mouse side buttons (Mouse4/Mouse5) as hotkeys, with optional key suppression to prevent conflicts.
-    *   **Clipboard & Saving**: Copy screenshots directly to clipboard in dual formats (`CF_DIB` for compatibility and `PNG` to preserve transparency), or save locally as a PNG.
+    *   **Clipboard & Saving**: Copies to clipboard in dual formats (`CF_DIB` for Paint and Office, `PNG` for Discord, Slack and other modern apps), or saves to disk - either via a dialog or automatically to a configured directory.
     *   **Startup on Boot**: Run at startup via the Windows Registry `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` (no admin privileges required).
 
 ## Configuration (config.json)
@@ -124,6 +130,14 @@ The Release workflow can also be triggered manually from GitHub with an explicit
     *   `Ctrl + Z`: undo the last annotation
     *   `Ctrl + Y` or `Ctrl + Shift + Z`: redo
     *   `Esc`: exit without saving
+
+7.  **Settings**: right-click the tray icon and open Settings to change the global hotkey, clipboard copying, the auto-save directory, tray notifications, the default capture mode, and launch on boot.
+
+## Known Limitations
+
+*   No scrolling / long screenshot capture, and no delayed capture.
+*   Undo rewinds in the order annotations were added; deleting a selected element is not separately undoable.
+*   Single instance: launching a second copy only shows a warning, it does not trigger a new capture.
 
 ## License
 
