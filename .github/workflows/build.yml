@@ -45,7 +45,7 @@ jobs:
           test -s CaptureTool.exe
 
       - name: Upload build artifact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: CaptureTool-preview
           path: CaptureTool.exe
