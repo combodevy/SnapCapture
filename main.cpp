@@ -149,6 +149,7 @@ struct DrawingShape {
 
 AnnotationMode g_annotationMode = ANNOTATION_NONE;
 vector<DrawingShape> g_shapes;
+vector<DrawingShape> g_redoStack; // 撤销后的标注暂存，用于重做
 bool g_isDrawingShape = false;
 DrawingShape g_tempShape;
 
@@ -430,6 +431,12 @@ void ResetEditingTextState();
 void ResetOverlaySessionState();
 bool SaveBitmapToConfiguredDirectory(HBITMAP hBmp, wstring& outPath);
 bool FinalizeCaptureOutput(HWND hWnd, HBITMAP hBmp, bool showSaveDialog, wstring* outSavedPath = NULL);
+HBITMAP CropScreenCapture(const RECT& sel);
+void ClearRedoStack();
+void UndoShape();
+void RedoShape();
+void DoCaptureConfirm(HWND hWnd);
+void DoCaptureSaveAs(HWND hWnd);
 
 // ========== 兼容性 wstring 转换函数 ==========
 wstring ToWString(int val) {
@@ -549,6 +556,7 @@ bool CommitEditingText() {
     textShape.fontStyle = g_currentFontStyle;
     textShape.origW = 0.0f;
     textShape.origH = 0.0f;
+    ClearRedoStack();
     g_shapes.push_back(textShape);
 
     ResetEditingTextState();
@@ -651,7 +659,51 @@ void ResetOverlaySessionState() {
     g_currentColor = Color(255, 231, 76, 60);
     g_currentThickness = 4;
     g_shapes.clear();
+    g_redoStack.clear();
     g_annotationMode = ANNOTATION_NONE;
+}
+
+// ========== 撤销 / 重做 ==========
+void ClearRedoStack() {
+    g_redoStack.clear();
+}
+
+void UndoShape() {
+    if (!g_shapes.empty()) {
+        g_redoStack.push_back(g_shapes.back());
+        g_shapes.pop_back();
+    }
+}
+
+void RedoShape() {
+    if (!g_redoStack.empty()) {
+        g_shapes.push_back(g_redoStack.back());
+        g_redoStack.pop_back();
+    }
+}
+
+// 确认输出：按配置复制到剪贴板 / 自动保存，然后关闭覆盖层
+void DoCaptureConfirm(HWND hWnd) {
+    CommitEditingText();
+    g_selectedTextIndex = -1;
+    HBITMAP hBmp = CropScreenCapture(g_overlay.selection);
+    if (hBmp) {
+        FinalizeCaptureOutput(hWnd, hBmp, false, NULL);
+        DeleteObject(hBmp);
+    }
+    SendMessage(hWnd, WM_CLOSE, 0, 0);
+}
+
+// 另存为：弹出保存对话框，然后关闭覆盖层
+void DoCaptureSaveAs(HWND hWnd) {
+    CommitEditingText();
+    g_selectedTextIndex = -1;
+    HBITMAP hBmp = CropScreenCapture(g_overlay.selection);
+    if (hBmp) {
+        FinalizeCaptureOutput(hWnd, hBmp, true, NULL);
+        DeleteObject(hBmp);
+    }
+    SendMessage(hWnd, WM_CLOSE, 0, 0);
 }
 
 // ========== DPI 感知初始化 ==========
@@ -3019,33 +3071,19 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
                         g_selectedTextIndex = -1;
                         if (g_isEditingText) {
                             ResetEditingTextState();
-                        } else if (!g_shapes.empty()) {
-                            g_shapes.pop_back();
+                        } else {
+                            UndoShape();
                         }
                         InvalidateRect(hWnd, NULL, FALSE);
                     }
                     else if (btn == 7) { // 保存
-                        CommitEditingText();
-                        g_selectedTextIndex = -1;
-                        HBITMAP hBmp = CropScreenCapture(g_overlay.selection);
-                        if (hBmp) {
-                            FinalizeCaptureOutput(hWnd, hBmp, true, NULL);
-                            DeleteObject(hBmp);
-                        }
-                        SendMessage(hWnd, WM_CLOSE, 0, 0);
+                        DoCaptureSaveAs(hWnd);
                     }
                     else if (btn == 8) { // 取消
                         SendMessage(hWnd, WM_CLOSE, 0, 0);
                     }
                     else if (btn == 9) { // 确定
-                        CommitEditingText();
-                        g_selectedTextIndex = -1;
-                        HBITMAP hBmp = CropScreenCapture(g_overlay.selection);
-                        if (hBmp) {
-                            FinalizeCaptureOutput(hWnd, hBmp, false, NULL);
-                            DeleteObject(hBmp);
-                        }
-                        SendMessage(hWnd, WM_CLOSE, 0, 0);
+                        DoCaptureConfirm(hWnd);
                     }
                     break; // 拦截消息，不往下处理
                 }
@@ -3321,6 +3359,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
                     }
                 }
                 if (shouldAdd) {
+                    ClearRedoStack();
                     g_shapes.push_back(g_tempShape);
                 }
                 InvalidateRect(hWnd, NULL, FALSE);
@@ -3414,6 +3453,43 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
         case WM_KEYDOWN: {
             // 组合输入期间的按键交给输入法，不要被当成编辑命令
             if (g_imeComposing) break;
+
+            // 全局编辑快捷键（正在编辑文字或圆角数值时不拦截）
+            if (!g_isEditingText && !g_isHoveringRoundRadius) {
+                bool ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+                bool shift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+
+                if (ctrl && wParam == 'Z' && shift) {
+                    RedoShape();
+                    g_selectedTextIndex = -1;
+                    InvalidateRect(hWnd, NULL, FALSE);
+                    break;
+                }
+                if (ctrl && wParam == 'Y') {
+                    RedoShape();
+                    g_selectedTextIndex = -1;
+                    InvalidateRect(hWnd, NULL, FALSE);
+                    break;
+                }
+                if (ctrl && wParam == 'Z') {
+                    UndoShape();
+                    g_selectedTextIndex = -1;
+                    InvalidateRect(hWnd, NULL, FALSE);
+                    break;
+                }
+                if (ctrl && wParam == 'S' && g_overlay.selectionDone) {
+                    DoCaptureSaveAs(hWnd);
+                    break;
+                }
+                if (ctrl && wParam == 'C' && g_overlay.selectionDone) {
+                    DoCaptureConfirm(hWnd);
+                    break;
+                }
+                if (wParam == VK_RETURN && g_overlay.selectionDone) {
+                    DoCaptureConfirm(hWnd);
+                    break;
+                }
+            }
             if (g_isHoveringRoundRadius) {
                 if (wParam == VK_BACK) {
                     if (!g_editingRoundRadiusStr.empty()) {

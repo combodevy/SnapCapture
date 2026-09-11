@@ -118,6 +118,13 @@ The Release workflow can also be triggered manually from GitHub with an explicit
     *   **Save (Floppy Disk icon)**: Prompts for a PNG destination, and copies to clipboard according to config.
     *   **Cancel (Cross icon) / Esc**: Exits without saving.
 
+6.  **Keyboard shortcuts**:
+    *   `Enter` or `Ctrl + C`: confirm (copies to clipboard, and auto-saves a PNG when a save directory is set) and exit
+    *   `Ctrl + S`: save as PNG
+    *   `Ctrl + Z`: undo the last annotation
+    *   `Ctrl + Y` or `Ctrl + Shift + Z`: redo
+    *   `Esc`: exit without saving
+
 ## License
 
 Released under the [MIT License](LICENSE).
