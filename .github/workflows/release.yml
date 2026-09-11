@@ -24,7 +24,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup MSYS2 / MinGW-w64
         uses: msys2/setup-msys2@v2
@@ -51,7 +51,7 @@ jobs:
           cp README.md README_EN.md LICENSE dist/
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.tag.outputs.name }}
           name: SnapCapture ${{ steps.tag.outputs.name }}

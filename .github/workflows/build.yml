@@ -20,7 +20,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup MSYS2 / MinGW-w64
         uses: msys2/setup-msys2@v2
@@ -45,7 +45,7 @@ jobs:
           test -s CaptureTool.exe
 
       - name: Upload build artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: CaptureTool-preview
           path: CaptureTool.exe
