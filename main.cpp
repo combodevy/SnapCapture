@@ -11,6 +11,7 @@
 #include <shlwapi.h>
 #include <shlobj.h>
 #include <string>
+#include <utility>
 #include <vector>
 #include <fstream>
 #include <sstream>
@@ -257,30 +258,48 @@ bool PromptForFont(HWND hWnd, wstring& outFamily, int& outSize, int& outStyle) {
     return false;
 }
 
-// 新增：高可靠性 GDI+ 字体构造器与降级策略，避免无效字体引发的 0 尺寸和崩溃
+// 高可靠性 GDI+ 字体构造器：字体无效时依次降级，避免 0 尺寸或崩溃。
+// 另外 GDI+ 每次 new Font 都要做字体匹配，而绘制是每帧进行的，
+// 因此按 (字体名, 字号, 样式) 缓存实例，避免重复构造。
+static vector<pair<wstring, Font*>> g_fontCache;
+
+static wstring MakeFontCacheKey(const wchar_t* family, REAL size, FontStyle style) {
+    return wstring(family) + L"|" + to_wstring((int)(size * 100.0f)) + L"|" + to_wstring((int)style);
+}
+
 Font* CreateSafeGdiplusFont(const wchar_t* family, REAL size, FontStyle style = FontStyleRegular) {
+    wstring key = MakeFontCacheKey(family, size, style);
+    for (size_t i = 0; i < g_fontCache.size(); ++i) {
+        if (g_fontCache[i].first == key) return g_fontCache[i].second;
+    }
+
     Font* font = new Font(family, size, style);
     if (font && font->GetLastStatus() == Ok) {
+        g_fontCache.push_back(pair<wstring, Font*>(key, font));
         return font;
     }
     if (font) delete font;
-    
+
     // 降级尝试1: 微软雅黑
     font = new Font(L"Microsoft YaHei", size, style);
     if (font && font->GetLastStatus() == Ok) {
+        g_fontCache.push_back(pair<wstring, Font*>(key, font));
         return font;
     }
     if (font) delete font;
-    
+
     // 降级尝试2: Arial
     font = new Font(L"Arial", size, style);
     if (font && font->GetLastStatus() == Ok) {
+        g_fontCache.push_back(pair<wstring, Font*>(key, font));
         return font;
     }
     if (font) delete font;
-    
+
     // 降级尝试3: 系统默认无衬线字体
-    return new Font(FontFamily::GenericSansSerif(), size, style);
+    font = new Font(FontFamily::GenericSansSerif(), size, style);
+    g_fontCache.push_back(pair<wstring, Font*>(key, font));
+    return font;
 }
 
 // 新增：判定鼠标点是否在当前编辑状态的文本包围盒内
@@ -299,7 +318,6 @@ bool IsPointInEditingText(HWND hWnd, POINT pt, float& outW, float& outH) {
     outW = bounds.Width;
     outH = bounds.Height;
     
-    delete pFont;
     ReleaseDC(hWnd, hdc);
     
     float cx = g_editTextPos.x + outW / 2.0f;
@@ -1294,7 +1312,6 @@ HBITMAP CropScreenCapture(const RECT& sel) {
                 g.DrawString(shp.text.c_str(), -1, pFont, PointF(-ow / 2.0f - ox, -oh / 2.0f - oy), &txtBrush);
                 
                 g.Restore(state);
-                delete pFont;
             }
         }
     }
@@ -1503,7 +1520,6 @@ void DrawOverlay(HWND hWnd, HDC hdc) {
                 g.DrawString(shp.text.c_str(), -1, pFont, PointF(-shp.origW / 2.0f - shp.origX, -shp.origH / 2.0f - shp.origY), &txtBrush);
                 
                 g.Restore(state);
-                delete pFont;
             }
         }
         
@@ -1621,7 +1637,6 @@ void DrawOverlay(HWND hWnd, HDC hdc) {
             g.DrawRectangle(&inputBorderPen, bx, by, bw, bh);
             
             g.Restore(state);
-            delete pFont;
         }
         
         // 绘制正在拖拽绘制中的临时图形
@@ -1685,13 +1700,13 @@ void DrawOverlay(HWND hWnd, HDC hdc) {
         
         // 5. 绘制尺寸标签
         wstring dimText = ToWString(sel.right - sel.left) + L" \u00d7 " + ToWString(sel.bottom - sel.top);
-        Font font(L"Microsoft YaHei", 9, FontStyleBold);
+        Font* font = CreateSafeGdiplusFont(L"Microsoft YaHei", 9, FontStyleBold);
         StringFormat format;
         format.SetAlignment(StringAlignmentCenter);
         format.SetLineAlignment(StringAlignmentCenter);
         
         RectF textBounding;
-        g.MeasureString(dimText.c_str(), -1, &font, PointF(0, 0), &textBounding);
+        g.MeasureString(dimText.c_str(), -1, font, PointF(0, 0), &textBounding);
         
         int label_w = (int)textBounding.Width + 12;
         int label_h = (int)textBounding.Height + 6;
@@ -1704,7 +1719,7 @@ void DrawOverlay(HWND hWnd, HDC hdc) {
         g.FillRectangle(&textBgBrush, label_x, label_y, label_w, label_h);
         
         SolidBrush textBrush(Color(255, 255, 255, 255));
-        g.DrawString(dimText.c_str(), -1, &font, RectF((REAL)label_x, (REAL)label_y, (REAL)label_w, (REAL)label_h), &format, &textBrush);
+        g.DrawString(dimText.c_str(), -1, font, RectF((REAL)label_x, (REAL)label_y, (REAL)label_w, (REAL)label_h), &format, &textBrush);
         
         // 6. 绘制悬浮工具栏 (口 矩形, ↗ 箭头, ↶ 撤销, ✓ 确认, 💾 保存, ✗ 取消)
         if (g_overlay.selectionDone && !g_overlay.isResizing) {
@@ -1911,7 +1926,7 @@ void DrawOverlay(HWND hWnd, HDC hdc) {
                         }
                         
                         SolidBrush btnBg(Color(255, 60, 60, 60));
-                        Font controlFont(L"Microsoft YaHei", 9, FontStyleBold);
+                        Font* controlFont = CreateSafeGdiplusFont(L"Microsoft YaHei", 9, FontStyleBold);
                         StringFormat sfCenter;
                         sfCenter.SetAlignment(StringAlignmentCenter);
                         sfCenter.SetLineAlignment(StringAlignmentCenter);
@@ -1919,26 +1934,26 @@ void DrawOverlay(HWND hWnd, HDC hdc) {
                         // 1. [-] 减少圆角按钮
                         RECT decRect = { st_x + 100, st_y + 8, st_x + 120, st_y + 28 };
                         g.FillRectangle(&btnBg, (int)decRect.left, (int)decRect.top, (int)(decRect.right - decRect.left), (int)(decRect.bottom - decRect.top));
-                        g.DrawString(L"-", -1, &controlFont, RectF(decRect.left, decRect.top, decRect.right - decRect.left, decRect.bottom - decRect.top), &sfCenter, &textBrush);
+                        g.DrawString(L"-", -1, controlFont, RectF(decRect.left, decRect.top, decRect.right - decRect.left, decRect.bottom - decRect.top), &sfCenter, &textBrush);
                         
                         // 2. 圆角数值文本标签
                         wstring roundText = L"圆角: " + ToWString(currentRound);
                         RECT roundRect = { st_x + 124, st_y + 8, st_x + 188, st_y + 28 };
-                        Font textFont(L"Microsoft YaHei", 8, FontStyleRegular);
+                        Font* textFont = CreateSafeGdiplusFont(L"Microsoft YaHei", 8, FontStyleRegular);
                         if (g_isHoveringRoundRadius) {
                             // 悬停时绘制精致的蓝色高亮边框和自定义输入的字符
                             Pen borderHighlight(Color(255, 0, 174, 255), 1.5f);
                             g.DrawRectangle(&borderHighlight, (int)roundRect.left, (int)roundRect.top, (int)(roundRect.right - roundRect.left), (int)(roundRect.bottom - roundRect.top));
                             wstring activeText = L"圆角: " + (g_editingRoundRadiusStr.empty() ? ToWString(currentRound) : g_editingRoundRadiusStr);
-                            g.DrawString(activeText.c_str(), -1, &textFont, RectF(roundRect.left, roundRect.top, roundRect.right - roundRect.left, roundRect.bottom - roundRect.top), &sfCenter, &textBrush);
+                            g.DrawString(activeText.c_str(), -1, textFont, RectF(roundRect.left, roundRect.top, roundRect.right - roundRect.left, roundRect.bottom - roundRect.top), &sfCenter, &textBrush);
                         } else {
-                            g.DrawString(roundText.c_str(), -1, &textFont, RectF(roundRect.left, roundRect.top, roundRect.right - roundRect.left, roundRect.bottom - roundRect.top), &sfCenter, &textBrush);
+                            g.DrawString(roundText.c_str(), -1, textFont, RectF(roundRect.left, roundRect.top, roundRect.right - roundRect.left, roundRect.bottom - roundRect.top), &sfCenter, &textBrush);
                         }
                         
                         // 3. [+] 增加圆角按钮
                         RECT incRect = { st_x + 192, st_y + 8, st_x + 212, st_y + 28 };
                         g.FillRectangle(&btnBg, (int)incRect.left, (int)incRect.top, (int)(incRect.right - incRect.left), (int)(incRect.bottom - incRect.top));
-                        g.DrawString(L"+", -1, &controlFont, RectF(incRect.left, incRect.top, incRect.right - incRect.left, incRect.bottom - incRect.top), &sfCenter, &textBrush);
+                        g.DrawString(L"+", -1, controlFont, RectF(incRect.left, incRect.top, incRect.right - incRect.left, incRect.bottom - incRect.top), &sfCenter, &textBrush);
                     }
                 } else {
                     // --- 绘制字号与字体选择器 ---
@@ -1954,23 +1969,23 @@ void DrawOverlay(HWND hWnd, HDC hdc) {
                     SolidBrush btnBg(Color(255, 60, 60, 60));
                     g.FillRectangle(&btnBg, (int)decRect.left, (int)decRect.top, (int)(decRect.right - decRect.left), (int)(decRect.bottom - decRect.top));
                     
-                    Font controlFont(L"Microsoft YaHei", 9, FontStyleBold);
+                    Font* controlFont = CreateSafeGdiplusFont(L"Microsoft YaHei", 9, FontStyleBold);
                     StringFormat sfCenter;
                     sfCenter.SetAlignment(StringAlignmentCenter);
                     sfCenter.SetLineAlignment(StringAlignmentCenter);
                     SolidBrush textBrush(Color(255, 255, 255, 255));
                     
-                    g.DrawString(L"-", -1, &controlFont, RectF(decRect.left, decRect.top, decRect.right - decRect.left, decRect.bottom - decRect.top), &sfCenter, &textBrush);
+                    g.DrawString(L"-", -1, controlFont, RectF(decRect.left, decRect.top, decRect.right - decRect.left, decRect.bottom - decRect.top), &sfCenter, &textBrush);
                     
                     // 2. Draw Font Size Text Label
                     wstring sizeText = ToWString(currentSize);
                     RECT sizeRect = { st_x + 36, st_y + 8, st_x + 64, st_y + 28 };
-                    g.DrawString(sizeText.c_str(), -1, &controlFont, RectF(sizeRect.left, sizeRect.top, sizeRect.right - sizeRect.left, sizeRect.bottom - sizeRect.top), &sfCenter, &textBrush);
+                    g.DrawString(sizeText.c_str(), -1, controlFont, RectF(sizeRect.left, sizeRect.top, sizeRect.right - sizeRect.left, sizeRect.bottom - sizeRect.top), &sfCenter, &textBrush);
                     
                     // 3. Draw Increase Button [+]
                     RECT incRect = { st_x + 68, st_y + 8, st_x + 88, st_y + 28 };
                     g.FillRectangle(&btnBg, (int)incRect.left, (int)incRect.top, (int)(incRect.right - incRect.left), (int)(incRect.bottom - incRect.top));
-                    g.DrawString(L"+", -1, &controlFont, RectF(incRect.left, incRect.top, incRect.right - incRect.left, incRect.bottom - incRect.top), &sfCenter, &textBrush);
+                    g.DrawString(L"+", -1, controlFont, RectF(incRect.left, incRect.top, incRect.right - incRect.left, incRect.bottom - incRect.top), &sfCenter, &textBrush);
                     
                     // 4. Draw Font Family Button
                     RECT fontRect = { st_x + 96, st_y + 8, st_x + 220, st_y + 28 };
@@ -1982,8 +1997,8 @@ void DrawOverlay(HWND hWnd, HDC hdc) {
                         dispFamily = dispFamily.substr(0, 7) + L"..";
                     }
                     
-                    Font familyFont(L"Microsoft YaHei", 8, FontStyleRegular);
-                    g.DrawString(dispFamily.c_str(), -1, &familyFont, RectF(fontRect.left, fontRect.top, fontRect.right - fontRect.left, fontRect.bottom - fontRect.top), &sfCenter, &textBrush);
+                    Font* familyFont = CreateSafeGdiplusFont(L"Microsoft YaHei", 8, FontStyleRegular);
+                    g.DrawString(dispFamily.c_str(), -1, familyFont, RectF(fontRect.left, fontRect.top, fontRect.right - fontRect.left, fontRect.bottom - fontRect.top), &sfCenter, &textBrush);
                 }
                 
                 // --- 绘制颜色选择器 (7个默认颜色 + 4个自定义色槽 + 1个修改设置按钮) ---
@@ -2082,13 +2097,13 @@ void DrawOverlay(HWND hWnd, HDC hdc) {
             wstring hint = IsWindowCaptureMode()
                 ? L"单击窗口快速截图，或拖拽改为区域截图    按 Esc 取消"
                 : L"拖拽鼠标框选截图区域    按 Esc 取消";
-            Font font(L"Microsoft YaHei", 12, FontStyleRegular);
+            Font* font = CreateSafeGdiplusFont(L"Microsoft YaHei", 12, FontStyleRegular);
             StringFormat format;
             format.SetAlignment(StringAlignmentCenter);
             format.SetLineAlignment(StringAlignmentCenter);
             
             RectF textBounding;
-            g.MeasureString(hint.c_str(), -1, &font, PointF(0, 0), &textBounding);
+            g.MeasureString(hint.c_str(), -1, font, PointF(0, 0), &textBounding);
             
             int box_w = (int)textBounding.Width + 40;
             int box_h = (int)textBounding.Height + 20;
@@ -2099,7 +2114,7 @@ void DrawOverlay(HWND hWnd, HDC hdc) {
             g.FillRectangle(&textBgBrush, box_x, box_y, box_w, box_h);
             
             SolidBrush textBrush(Color(180, 255, 255, 255));
-            g.DrawString(hint.c_str(), -1, &font, RectF((REAL)box_x, (REAL)box_y, (REAL)box_w, (REAL)box_h), &format, &textBrush);
+            g.DrawString(hint.c_str(), -1, font, RectF((REAL)box_x, (REAL)box_y, (REAL)box_w, (REAL)box_h), &format, &textBrush);
         }
     }
     
@@ -2560,7 +2575,6 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
                             shp.origY = bounds.Y;
                             shp.end.x = shp.start.x + (int)bounds.Width;
                             shp.end.y = shp.start.y + (int)bounds.Height;
-                            delete pFont;
                             ReleaseDC(hWnd, tmpDC);
                         }
                         
@@ -2957,7 +2971,6 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
                                     shp.origY = bounds.Y;
                                     shp.end.x = shp.start.x + (int)bounds.Width;
                                     shp.end.y = shp.start.y + (int)bounds.Height;
-                                    delete pFont;
                                     ReleaseDC(hWnd, tmpDC);
                                 }
                                 
