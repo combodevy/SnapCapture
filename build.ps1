@@ -57,7 +57,7 @@ try {
     $compileArgs += @('-o', $OutputName)
     $compileArgs += @(
         '-lgdi32', '-lgdiplus', '-lshlwapi', '-luser32',
-        '-lshell32', '-lole32', '-lcomdlg32', '-ldwmapi'
+        '-lshell32', '-lole32', '-lcomdlg32', '-ldwmapi', '-limm32'
     )
 
     Write-Step "Compiling $OutputName ..."

@@ -82,7 +82,7 @@ Example:
 The script runs the equivalent of:
 
 ```powershell
-g++ -std=c++11 -O3 -mwindows -static main.cpp -lgdi32 -lgdiplus -lshlwapi -luser32 -lshell32 -lole32 -lcomdlg32 -ldwmapi -o CaptureTool.exe
+g++ -std=c++11 -O3 -mwindows -static main.cpp -lgdi32 -lgdiplus -lshlwapi -luser32 -lshell32 -lole32 -lcomdlg32 -ldwmapi -limm32 -o CaptureTool.exe
 ```
 
 ## CI & Release

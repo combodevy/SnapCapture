@@ -82,7 +82,7 @@ SnapCapture 是一款基于 C++11、Win32 API 和 GDI/GDI+ 实现的 Windows 轻
 脚本内部等价于执行：
 
 ```powershell
-g++ -std=c++11 -O3 -mwindows -static main.cpp -lgdi32 -lgdiplus -lshlwapi -luser32 -lshell32 -lole32 -lcomdlg32 -ldwmapi -o CaptureTool.exe
+g++ -std=c++11 -O3 -mwindows -static main.cpp -lgdi32 -lgdiplus -lshlwapi -luser32 -lshell32 -lole32 -lcomdlg32 -ldwmapi -limm32 -o CaptureTool.exe
 ```
 
 *   `-O3`：开启编译器最大优化。
