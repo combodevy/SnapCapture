@@ -1,6 +1,6 @@
 # SnapCapture (CaptureTool)
 
-[English Version](README_EN.md) | [![TypeScript](https://img.shields.io/badge/TypeScript-007ACC?style=flat-square&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
+[English Version](README_EN.md)
 
 SnapCapture 是一款基于 C++11、Win32 API 和 GDI/GDI+ 实现的 Windows 轻量级原生截图与标注工具。
 
@@ -40,10 +40,11 @@ SnapCapture 是一款基于 C++11、Win32 API 和 GDI/GDI+ 实现的 Windows 轻
     "suppress": true           // 是否阻止该快捷键被传递给其他应用程序
   },
   "auto_start": true,          // 是否开机自启动
-  "save_to_clipboard": true,   // 是否默认保存到剪贴板
-  "save_directory": "",        // 截图自动保存目录
+  "save_to_clipboard": true,   // 是否在截图后复制到剪贴板
+  "save_directory": "",        // 点击确定后自动保存 PNG 的目录
+  "notification": true,        // 是否显示托盘通知
   "round_radius": 10,          // 矩形标注的圆角半径 (0-30 像素)
-  "capture_mode": "region"     // 默认截图模式: "region" 或 "window"
+  "capture_mode": "region"     // 默认截图模式: "region"(区域) 或 "window"(窗口)
 }
 ```
 
@@ -60,13 +61,51 @@ SnapCapture 是一款基于 C++11、Win32 API 和 GDI/GDI+ 实现的 Windows 轻
    ```powershell
    .\build.ps1
    ```
-3. 编译命令说明：
-   ```powershell
-   g++ -std=c++11 -O3 -mwindows -static main.cpp -lgdi32 -lgdiplus -lshlwapi -luser32 -lshell32 -lole32 -lcomdlg32 -ldwmapi -o CaptureTool.exe
-   ```
-   *   `-O3`：开启编译器最大优化。
-   *   `-static`：静态链接运行时库，使生成文件独立运行。
-   *   `-mwindows`：隐藏命令行窗口。
+
+### 构建脚本参数
+
+| 参数 | 说明 | 默认值 |
+| --- | --- | --- |
+| `-OutputName` | 输出的可执行文件名 | `CaptureTool.exe` |
+| `-Architecture` | 目标架构，可选 `x64` 或 `x86` | `x64` |
+| `-Strip` | 链接后剥离符号表，减小体积 | 关闭 |
+| `-Run` | 编译成功后立即启动程序 | 关闭 |
+
+示例：
+
+```powershell
+.\build.ps1 -Strip -Run
+```
+
+### 编译命令说明
+
+脚本内部等价于执行：
+
+```powershell
+g++ -std=c++11 -O3 -mwindows -static main.cpp -lgdi32 -lgdiplus -lshlwapi -luser32 -lshell32 -lole32 -lcomdlg32 -ldwmapi -o CaptureTool.exe
+```
+
+*   `-O3`：开启编译器最大优化。
+*   `-static`：静态链接运行时库，使生成文件独立运行。
+*   `-mwindows`：隐藏命令行窗口。
+
+## 自动构建与发布
+
+项目使用 GitHub Actions 完成持续集成与发布：
+
+*   **Build Check**（`.github/workflows/build.yml`）：每次 push / PR 都会在 `windows-latest` + MinGW-w64 环境中真实编译一次，并上传 `CaptureTool.exe` 作为构建产物，确保改动不会破坏编译。
+*   **Release**（`.github/workflows/release.yml`）：推送 `v*` 标签时自动编译、剥离符号，并创建 GitHub Release，附件为 `CaptureTool.exe`。
+
+发布新版本：
+
+```powershell
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+也可以在 GitHub 上手动运行 Release 工作流并指定 tag。
+
+> 注意：可执行文件不再提交进仓库，请从 Releases 页面或 Actions 构建产物中获取。
 
 ## 使用说明
 
@@ -79,6 +118,10 @@ SnapCapture 是一款基于 C++11、Win32 API 和 GDI/GDI+ 实现的 Windows 轻
     *   在下方工具栏选择矩形、圆形、箭头、画笔、文字工具，拖拽即可进行标注。
     *   双击文本框可原地编辑文字，使用手柄可以平移、缩放或旋转标注元素。
 5.  **输出**：
-    *   **确定（勾号）**：复制当前截图到剪贴板并退出。
-    *   **保存（软盘）**：在复制到剪贴板的同时，弹出保存对话框另存为 PNG。
+    *   **确定（勾号）**：按配置复制到剪贴板；若设置了自动保存目录，则同时保存 PNG 到该目录。
+    *   **保存（软盘）**：弹出保存对话框另存为 PNG，并按配置决定是否同时复制到剪贴板。
     *   **取消（叉号）/ Esc 键**：退出截图不保存。
+
+## 许可证
+
+本项目基于 [MIT License](LICENSE) 开源。

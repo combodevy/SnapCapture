@@ -1,6 +1,6 @@
 # SnapCapture (CaptureTool)
 
-[中文版](README.md) | [![TypeScript](https://img.shields.io/badge/TypeScript-007ACC?style=flat-square&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
+[中文版](README.md)
 
 SnapCapture is a lightweight, native Windows screenshot and annotation tool built using C++11, Win32 API, and GDI/GDI+.
 
@@ -42,6 +42,7 @@ The configuration file is automatically generated in the same directory as the e
   "auto_start": true,
   "save_to_clipboard": true,
   "save_directory": "",
+  "notification": true,
   "round_radius": 10,
   "capture_mode": "region"
 }
@@ -60,10 +61,47 @@ The configuration file is automatically generated in the same directory as the e
    ```powershell
    .\build.ps1
    ```
-3. Compilation flags:
-   ```powershell
-   g++ -std=c++11 -O3 -mwindows -static main.cpp -lgdi32 -lgdiplus -lshlwapi -luser32 -lshell32 -lole32 -lcomdlg32 -ldwmapi -o CaptureTool.exe
-   ```
+
+### Build script parameters
+
+| Parameter | Description | Default |
+| --- | --- | --- |
+| `-OutputName` | Name of the produced executable | `CaptureTool.exe` |
+| `-Architecture` | Target architecture: `x64` or `x86` | `x64` |
+| `-Strip` | Strip symbols after linking to reduce size | Off |
+| `-Run` | Launch the executable after a successful build | Off |
+
+Example:
+
+```powershell
+.\build.ps1 -Strip -Run
+```
+
+### Compilation flags
+
+The script runs the equivalent of:
+
+```powershell
+g++ -std=c++11 -O3 -mwindows -static main.cpp -lgdi32 -lgdiplus -lshlwapi -luser32 -lshell32 -lole32 -lcomdlg32 -ldwmapi -o CaptureTool.exe
+```
+
+## CI & Release
+
+GitHub Actions handles continuous integration and releases:
+
+*   **Build Check** (`.github/workflows/build.yml`): every push or pull request triggers a real MinGW-w64 build on `windows-latest`, and uploads `CaptureTool.exe` as a build artifact.
+*   **Release** (`.github/workflows/release.yml`): pushing a `v*` tag builds a stripped binary and publishes a GitHub Release with `CaptureTool.exe` attached.
+
+To publish a new version:
+
+```powershell
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+The Release workflow can also be triggered manually from GitHub with an explicit tag.
+
+> The compiled executable is no longer committed to the repository. Get it from the Releases page or from the Actions build artifacts.
 
 ## Usage
 
@@ -76,6 +114,10 @@ The configuration file is automatically generated in the same directory as the e
     *   Select tools (Rectangle, Circle, Arrow, Pencil, Text) from the floating toolbar.
     *   Customize color, thickness, roundness, or font styling on the fly.
 5.  **Save/Output**:
-    *   **Confirm (Checkmark icon)**: Copies to clipboard and exits.
-    *   **Save (Floppy Disk icon)**: Copies to clipboard and prompts to save as PNG.
+    *   **Confirm (Checkmark icon)**: Copies to clipboard according to config, and auto-saves a PNG when a save directory is configured.
+    *   **Save (Floppy Disk icon)**: Prompts for a PNG destination, and copies to clipboard according to config.
     *   **Cancel (Cross icon) / Esc**: Exits without saving.
+
+## License
+
+Released under the [MIT License](LICENSE).

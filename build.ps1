@@ -1,34 +1,82 @@
-# CaptureTool C++ Rebuild - Native Compilation Script
-# Natively compiles main.cpp to a super-optimized static binary without runtime dll dependencies.
+#Requires -Version 5.1
+<#
+    SnapCapture build script.
+    Compiles main.cpp into a single, statically linked Windows executable.
+#>
 
-Write-Host "==========================================" -ForegroundColor Cyan
-Write-Host "  CaptureTool C++ Rebuild Compiler" -ForegroundColor Cyan
-Write-Host "==========================================" -ForegroundColor Cyan
-Write-Host ""
+[CmdletBinding()]
+param(
+    [string]$OutputName = 'CaptureTool.exe',
 
-# Check if g++ is available
-if (!(Get-Command g++ -ErrorAction SilentlyContinue)) {
-    Write-Error "Error: g++.exe not found in PATH! Make sure the compiler toolchain is active."
+    [ValidateSet('x64', 'x86')]
+    [string]$Architecture = 'x64',
+
+    [switch]$Strip,
+
+    [switch]$Run
+)
+
+$ErrorActionPreference = 'Stop'
+
+function Write-Step { param([string]$Message) Write-Host "[build] $Message" -ForegroundColor Cyan }
+function Write-Ok    { param([string]$Message) Write-Host "[ ok  ] $Message" -ForegroundColor Green }
+function Write-Err   { param([string]$Message) Write-Host "[fail ] $Message" -ForegroundColor Red }
+
+Write-Host ''
+Write-Host '==========================================' -ForegroundColor Cyan
+Write-Host '  SnapCapture Build Script' -ForegroundColor Cyan
+Write-Host '==========================================' -ForegroundColor Cyan
+Write-Host ''
+
+$gxx = Get-Command g++ -ErrorAction SilentlyContinue
+if (-not $gxx) {
+    Write-Err 'g++.exe was not found in PATH.'
+    Write-Host '       Install MinGW-w64 and make sure its bin directory is on PATH.' -ForegroundColor Yellow
     exit 1
 }
 
-Write-Host "Compiling main.cpp..." -ForegroundColor Yellow
+Write-Step ("Compiler : {0}" -f $gxx.Source)
+Write-Step ("Version  : {0}" -f $(& g++ --version | Select-Object -First 1))
+Write-Step ("Target   : {0}" -f $Architecture)
 
-# Run g++ compiler with high optimization (-O3) and subsystem windows (-mwindows to hide command prompt)
-# Static link (-static) to bundle everything in a single standalone .exe
-g++ -std=c++11 -O3 -mwindows -static main.cpp -lgdi32 -lgdiplus -lshlwapi -luser32 -lshell32 -lole32 -lcomdlg32 -ldwmapi -o CaptureTool.exe
+$projectRoot = $PSScriptRoot
+Push-Location $projectRoot
 
-if ($LASTEXITCODE -eq 0) {
-    Write-Host ""
-    Write-Host "==========================================" -ForegroundColor Green
-    Write-Host "  Success! CaptureTool.exe compiled!   " -ForegroundColor Green
-    Write-Host "==========================================" -ForegroundColor Green
-    Write-Host ""
-    
-    # Keep compiled .exe in the project folder to prevent desktop clutter
-    # Copy-Item -Path "CaptureTool.exe" -Destination "C:\Users\22636\Desktop\CaptureTool.exe" -Force
-    Write-Host "Executable kept inside capturetool folder. [OK]" -ForegroundColor Green
-} else {
-    Write-Host ""
-    Write-Error "Compilation failed! Check the compiler errors above."
+try {
+    $source = Join-Path $projectRoot 'main.cpp'
+    if (-not (Test-Path -LiteralPath $source)) {
+        Write-Err "Source file not found: $source"
+        exit 1
+    }
+
+    $compileArgs = @('-std=c++11', '-O3', '-mwindows', '-static')
+    if ($Architecture -eq 'x86') { $compileArgs += '-m32' }
+    if ($Strip)                  { $compileArgs += '-s'  }
+
+    $compileArgs += $source
+    $compileArgs += @('-o', $OutputName)
+    $compileArgs += @(
+        '-lgdi32', '-lgdiplus', '-lshlwapi', '-luser32',
+        '-lshell32', '-lole32', '-lcomdlg32', '-ldwmapi'
+    )
+
+    Write-Step "Compiling $OutputName ..."
+    & g++ @compileArgs
+
+    if ($LASTEXITCODE -ne 0) {
+        Write-Err "Compilation failed with exit code $LASTEXITCODE."
+        exit $LASTEXITCODE
+    }
+
+    $exe = Get-Item -LiteralPath $OutputName
+    Write-Ok ("Build succeeded: {0} ({1:N2} MB)" -f $exe.Name, ($exe.Length / 1MB))
+    Write-Step ("Output: {0}" -f $exe.FullName)
+
+    if ($Run) {
+        Write-Step 'Launching executable...'
+        Start-Process -FilePath $exe.FullName
+    }
+}
+finally {
+    Pop-Location
 }
