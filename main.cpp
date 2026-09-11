@@ -28,6 +28,10 @@
 #pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "comdlg32.lib")
 
+#ifndef DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
+#define DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 ((HANDLE)-4)
+#endif
+
 using namespace Gdiplus;
 using namespace std;
 
@@ -353,10 +357,6 @@ void FillRoundedRectangle(Graphics& g, Brush* brush, REAL x, REAL y, REAL width,
     g.FillPath(brush, &path);
 }
 
-int ThicknessToFontSize(int thickness) {
-    return 8 + thickness * 3;
-}
-
 // ========== 拖动调整大小手柄与交互状态 ==========
 enum ResizeHandle {
     NONE_HANDLE = 0,
@@ -396,6 +396,13 @@ int GetEncoderClsid(const WCHAR* format, CLSID* pClsid);
 bool CopyBitmapToClipboard(HBITMAP hBmp);
 bool SaveBitmapToFile(HBITMAP hBmp, const wstring& filepath);
 void UpdateTrayAutostartMenu(HMENU hMenu);
+void ShowTrayNotification(const wstring& title, const wstring& message, DWORD infoFlags = NIIF_INFO);
+bool IsWindowCaptureMode();
+bool CommitEditingText();
+void ResetEditingTextState();
+void ResetOverlaySessionState();
+bool SaveBitmapToConfiguredDirectory(HBITMAP hBmp, wstring& outPath);
+bool FinalizeCaptureOutput(HWND hWnd, HBITMAP hBmp, bool showSaveDialog, wstring* outSavedPath = NULL);
 
 // ========== 兼容性 wstring 转换函数 ==========
 wstring ToWString(int val) {
@@ -404,23 +411,201 @@ wstring ToWString(int val) {
     return wss.str();
 }
 
+wstring BuildTimestampedScreenshotName() {
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+
+    wchar_t filename[64];
+    swprintf_s(filename, L"SnapCapture_%04d%02d%02d_%02d%02d%02d.png",
+        st.wYear, st.wMonth, st.wDay,
+        st.wHour, st.wMinute, st.wSecond);
+    return filename;
+}
+
+wstring JoinPath(const wstring& dir, const wstring& name) {
+    if (dir.empty()) return name;
+    if (dir.back() == L'\\' || dir.back() == L'/') {
+        return dir + name;
+    }
+    return dir + L"\\" + name;
+}
+
+void ShowTrayNotification(const wstring& title, const wstring& message, DWORD infoFlags) {
+    if (!g_hWndMain) return;
+
+    NOTIFYICONDATA nid = { sizeof(nid) };
+    nid.hWnd = g_hWndMain;
+    nid.uID = TRAY_ICON_ID;
+    nid.uFlags = NIF_INFO;
+    nid.dwInfoFlags = infoFlags;
+    wcsncpy_s(nid.szInfoTitle, title.c_str(), _TRUNCATE);
+    wcsncpy_s(nid.szInfo, message.c_str(), _TRUNCATE);
+    Shell_NotifyIcon(NIM_MODIFY, &nid);
+}
+
+bool IsWindowCaptureMode() {
+    return g_config.capture_mode == L"window";
+}
+
+void ResetEditingTextState() {
+    g_isEditingText = false;
+    g_editingText = L"";
+    g_editingCaretIndex = 0;
+    g_isDraggingEditingText = false;
+    g_editingTextDragOffset = { 0, 0 };
+}
+
+bool CommitEditingText() {
+    if (!g_isEditingText || g_editingText.empty()) {
+        ResetEditingTextState();
+        return false;
+    }
+
+    DrawingShape textShape;
+    textShape.type = SHAPE_TEXT;
+    textShape.start = g_editTextPos;
+    textShape.end = g_editTextPos;
+    textShape.color = g_currentColor;
+    textShape.thickness = g_currentThickness;
+    textShape.text = g_editingText;
+    textShape.angle = g_editAngle;
+    textShape.scale = g_editScale;
+    textShape.fontSize = g_currentFontSize;
+    textShape.fontFamily = g_currentFontFamily;
+    textShape.fontStyle = g_currentFontStyle;
+    textShape.origW = 0.0f;
+    textShape.origH = 0.0f;
+    g_shapes.push_back(textShape);
+
+    ResetEditingTextState();
+    return true;
+}
+
+bool SaveBitmapToConfiguredDirectory(HBITMAP hBmp, wstring& outPath) {
+    if (!hBmp || g_config.save_directory.empty()) return false;
+
+    int createResult = SHCreateDirectoryEx(NULL, g_config.save_directory.c_str(), NULL);
+    if (createResult != ERROR_SUCCESS && createResult != ERROR_ALREADY_EXISTS && createResult != ERROR_FILE_EXISTS) {
+        return false;
+    }
+
+    outPath = JoinPath(g_config.save_directory, BuildTimestampedScreenshotName());
+    return SaveBitmapToFile(hBmp, outPath);
+}
+
+bool SaveBitmapWithDialog(HWND hWnd, HBITMAP hBmp, wstring& outPath) {
+    if (!hBmp) return false;
+
+    OPENFILENAME ofn = { 0 };
+    wchar_t fileSz[MAX_PATH] = L"screenshot.png";
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = hWnd;
+    ofn.lpstrFilter = L"PNG Image\0*.png\0";
+    ofn.lpstrFile = fileSz;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.Flags = OFN_PATHMUSTEXIST | OFN_OVERWRITEPROMPT;
+    ofn.lpstrDefExt = L"png";
+    ofn.lpstrInitialDir = g_config.save_directory.empty() ? NULL : g_config.save_directory.c_str();
+
+    if (!GetSaveFileName(&ofn)) return false;
+    outPath = ofn.lpstrFile;
+    return SaveBitmapToFile(hBmp, outPath);
+}
+
+bool FinalizeCaptureOutput(HWND hWnd, HBITMAP hBmp, bool showSaveDialog, wstring* outSavedPath) {
+    if (!hBmp) return false;
+
+    bool shouldCopy = g_config.save_to_clipboard || (!showSaveDialog && g_config.save_directory.empty());
+    bool didCopy = false;
+    bool didSave = false;
+    wstring savedPath;
+
+    if (shouldCopy) {
+        didCopy = CopyBitmapToClipboard(hBmp);
+    }
+
+    if (showSaveDialog) {
+        didSave = SaveBitmapWithDialog(hWnd, hBmp, savedPath);
+    } else if (!g_config.save_directory.empty()) {
+        didSave = SaveBitmapToConfiguredDirectory(hBmp, savedPath);
+    }
+
+    if (outSavedPath) {
+        *outSavedPath = savedPath;
+    }
+
+    if (g_config.notification) {
+        if (didCopy && didSave) {
+            ShowTrayNotification(L"SnapCapture", L"截图已复制到剪贴板，并自动保存到目录。", NIIF_INFO);
+        } else if (didSave) {
+            ShowTrayNotification(L"SnapCapture", L"截图已保存。", NIIF_INFO);
+        } else if (didCopy) {
+            ShowTrayNotification(L"SnapCapture", L"截图已复制到剪贴板。", NIIF_INFO);
+        } else {
+            ShowTrayNotification(L"SnapCapture", L"截图输出失败，请检查保存目录或权限。", NIIF_WARNING);
+        }
+    }
+
+    return didCopy || didSave;
+}
+
+void ResetOverlaySessionState() {
+    g_overlay.selectionDone = false;
+    g_overlay.selection = { 0, 0, 0, 0 };
+    g_overlay.hasDetectedWindow = false;
+    g_overlay.isPossibleClick = false;
+    g_overlay.isSelecting = false;
+    g_overlay.isResizing = false;
+    g_overlay.activeHandle = NONE_HANDLE;
+    g_overlay.hoveredButton = 0;
+    g_isDrawingShape = false;
+    ResetEditingTextState();
+    g_isDraggingText = false;
+    g_draggingTextIndex = -1;
+    g_selectedTextIndex = -1;
+    g_isRotatingText = false;
+    g_rotatingTextIndex = -1;
+    g_isResizingText = false;
+    g_resizingTextIndex = -1;
+    g_isHoveringRoundRadius = false;
+    g_editingRoundRadiusStr = L"";
+    g_editAngle = 0.0f;
+    g_editScale = 1.0f;
+    g_currentFontSize = 24;
+    g_currentFontFamily = L"Microsoft YaHei";
+    g_currentFontStyle = 0;
+    g_currentColor = Color(255, 231, 76, 60);
+    g_currentThickness = 4;
+    g_shapes.clear();
+    g_annotationMode = ANNOTATION_NONE;
+}
+
 // ========== DPI 感知初始化 ==========
 void InitDpiAwareness() {
+    HMODULE hUser32 = GetModuleHandle(L"user32.dll");
+    if (hUser32) {
+        typedef BOOL(WINAPI* PFN_SetProcessDpiAwarenessContext)(HANDLE);
+        PFN_SetProcessDpiAwarenessContext pfnContext = (PFN_SetProcessDpiAwarenessContext)GetProcAddress(hUser32, "SetProcessDpiAwarenessContext");
+        if (pfnContext && pfnContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)) {
+            return;
+        }
+    }
+
     HMODULE hShcore = LoadLibrary(L"shcore.dll");
     if (hShcore) {
         typedef HRESULT(WINAPI* PFN_SetProcessDpiAwareness)(int);
         PFN_SetProcessDpiAwareness pfn = (PFN_SetProcessDpiAwareness)GetProcAddress(hShcore, "SetProcessDpiAwareness");
-        if (pfn) {
-            pfn(2); // PROCESS_PER_MONITOR_DPI_AWARE
+        if (pfn && SUCCEEDED(pfn(2))) {
+            FreeLibrary(hShcore);
+            return;
         }
         FreeLibrary(hShcore);
-    } else {
-        HMODULE hUser32 = GetModuleHandle(L"user32.dll");
-        if (hUser32) {
-            typedef BOOL(WINAPI* PFN_SetProcessDPIAware)();
-            PFN_SetProcessDPIAware pfn = (PFN_SetProcessDPIAware)GetProcAddress(hUser32, "SetProcessDPIAware");
-            if (pfn) pfn();
-        }
+    }
+
+    if (hUser32) {
+        typedef BOOL(WINAPI* PFN_SetProcessDPIAware)();
+        PFN_SetProcessDPIAware pfn = (PFN_SetProcessDPIAware)GetProcAddress(hUser32, "SetProcessDPIAware");
+        if (pfn) pfn();
     }
 }
 
@@ -1894,7 +2079,9 @@ void DrawOverlay(HWND hWnd, HDC hdc) {
             }
         } else {
             // 绘制初始化指引提示文字
-            wstring hint = L"拖拽鼠标框选截图区域    按 Esc 取消";
+            wstring hint = IsWindowCaptureMode()
+                ? L"单击窗口快速截图，或拖拽改为区域截图    按 Esc 取消"
+                : L"拖拽鼠标框选截图区域    按 Esc 取消";
             Font font(L"Microsoft YaHei", 12, FontStyleRegular);
             StringFormat format;
             format.SetAlignment(StringAlignmentCenter);
@@ -2025,6 +2212,9 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
             EndPaint(hWnd, &ps);
             break;
         }
+        case WM_SETCURSOR: {
+            return TRUE;
+        }
         case WM_MOUSEMOVE: {
             POINT pt;
             pt.x = LOWORD(lParam);
@@ -2142,28 +2332,31 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
                 InvalidateRect(hWnd, NULL, FALSE);
             }
             else if (!g_overlay.selectionDone) {
-                // 如果用户没有框选完成，且正处于悬停探索状态下：自动进行智能窗口捕获
-                POINT ptScreen = pt;
-                ptScreen.x += g_screenX;
-                ptScreen.y += g_screenY;
-                
-                RECT rcWin;
-                if (GetWindowRectAtPoint(ptScreen, &rcWin)) {
-                    if (!g_overlay.hasDetectedWindow || 
-                        rcWin.left != g_overlay.detectedWindowRect.left ||
-                        rcWin.top != g_overlay.detectedWindowRect.top ||
-                        rcWin.right != g_overlay.detectedWindowRect.right ||
-                        rcWin.bottom != g_overlay.detectedWindowRect.bottom) {
-                        
-                        g_overlay.detectedWindowRect = rcWin;
-                        g_overlay.hasDetectedWindow = true;
-                        InvalidateRect(hWnd, NULL, FALSE);
-                    }
-                } else {
-                    if (g_overlay.hasDetectedWindow) {
+                if (IsWindowCaptureMode()) {
+                    // 默认窗口模式下，自动进行智能窗口捕获
+                    POINT ptScreen = pt;
+                    ptScreen.x += g_screenX;
+                    ptScreen.y += g_screenY;
+
+                    RECT rcWin;
+                    if (GetWindowRectAtPoint(ptScreen, &rcWin)) {
+                        if (!g_overlay.hasDetectedWindow || 
+                            rcWin.left != g_overlay.detectedWindowRect.left ||
+                            rcWin.top != g_overlay.detectedWindowRect.top ||
+                            rcWin.right != g_overlay.detectedWindowRect.right ||
+                            rcWin.bottom != g_overlay.detectedWindowRect.bottom) {
+
+                            g_overlay.detectedWindowRect = rcWin;
+                            g_overlay.hasDetectedWindow = true;
+                            InvalidateRect(hWnd, NULL, FALSE);
+                        }
+                    } else if (g_overlay.hasDetectedWindow) {
                         g_overlay.hasDetectedWindow = false;
                         InvalidateRect(hWnd, NULL, FALSE);
                     }
+                } else if (g_overlay.hasDetectedWindow) {
+                    g_overlay.hasDetectedWindow = false;
+                    InvalidateRect(hWnd, NULL, FALSE);
                 }
                 SetCursor(LoadCursor(NULL, IDC_CROSS));
             }
@@ -2384,23 +2577,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
                             localY >= -shp.origH/2.0f - 4.0f && localY <= shp.origH/2.0f + 4.0f) {
                             
                             // Double clicked this text! Finalize any previous editing text first
-                            if (g_isEditingText && !g_editingText.empty()) {
-                                DrawingShape textShape;
-                                textShape.type = SHAPE_TEXT;
-                                textShape.start = g_editTextPos;
-                                textShape.end = g_editTextPos;
-                                textShape.color = g_currentColor;
-                                textShape.thickness = g_currentThickness;
-                                textShape.text = g_editingText;
-                                textShape.angle = g_editAngle;
-                                textShape.scale = g_editScale;
-                                textShape.fontSize = g_currentFontSize;
-                                textShape.fontFamily = g_currentFontFamily;
-                                textShape.fontStyle = g_currentFontStyle;
-                                textShape.origW = 0.0f;
-                                textShape.origH = 0.0f;
-                                g_shapes.push_back(textShape);
-                            }
+                            CommitEditingText();
                             
                             g_isEditingText = true;
                             g_editingText = shp.text;
@@ -2432,11 +2609,11 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
             pt.y = HIWORD(lParam);
             
             if (!g_overlay.selectionDone) {
-                // 开始全新框选流程 (可能是单击选择窗体，也可能是长按拖拽选区)
+                // 开始全新框选流程 (窗口模式支持单击选窗，区域模式则直接进入拖拽框选)
                 g_overlay.startPos = pt;
                 g_overlay.selection = { pt.x, pt.y, pt.x, pt.y };
                 g_overlay.isSelecting = true;
-                g_overlay.isPossibleClick = true; // 先假设是点击，若鼠标产生拖拽位移则判定为长按拖拽
+                g_overlay.isPossibleClick = IsWindowCaptureMode();
                 InvalidateRect(hWnd, NULL, FALSE);
             } else {
                 // 1. 判断是否点击在主工具栏或子工具栏的物理边界区域内 (防止误触导致选区重置)
@@ -2669,32 +2846,8 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
                     int btn = clickedBtn;
                     g_overlay.hoveredButton = clickedBtn; // 同步高亮状态
                     
-                    // 切换标注模式时，先提交正在编辑的文字
-                    auto finalizeEditingText = [&]() {
-                        if (g_isEditingText && !g_editingText.empty()) {
-                            DrawingShape textShape;
-                            textShape.type = SHAPE_TEXT;
-                            textShape.start = g_editTextPos;
-                            textShape.end = g_editTextPos;
-                            textShape.color = g_currentColor;
-                            textShape.thickness = g_currentThickness;
-                            textShape.text = g_editingText;
-                            textShape.angle = g_editAngle;
-                            textShape.scale = g_editScale;
-                            textShape.fontSize = g_currentFontSize;
-                            textShape.fontFamily = g_currentFontFamily;
-                            textShape.fontStyle = g_currentFontStyle;
-                            textShape.origW = 0.0f;
-                            textShape.origH = 0.0f;
-                            g_shapes.push_back(textShape);
-                        }
-                        g_isEditingText = false;
-                        g_editingText = L"";
-                        g_editingCaretIndex = 0;
-                    };
-                    
                     if (btn == 1) { // 矩形
-                        finalizeEditingText();
+                        CommitEditingText();
                         g_selectedTextIndex = -1;
                         if (g_annotationMode == ANNOTATION_RECTANGLE) {
                             g_annotationMode = ANNOTATION_NONE;
@@ -2704,7 +2857,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
                         InvalidateRect(hWnd, NULL, FALSE);
                     }
                     else if (btn == 2) { // 圆形
-                        finalizeEditingText();
+                        CommitEditingText();
                         g_selectedTextIndex = -1;
                         if (g_annotationMode == ANNOTATION_CIRCLE) {
                             g_annotationMode = ANNOTATION_NONE;
@@ -2714,7 +2867,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
                         InvalidateRect(hWnd, NULL, FALSE);
                     }
                     else if (btn == 3) { // 箭头
-                        finalizeEditingText();
+                        CommitEditingText();
                         g_selectedTextIndex = -1;
                         if (g_annotationMode == ANNOTATION_ARROW) {
                             g_annotationMode = ANNOTATION_NONE;
@@ -2724,7 +2877,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
                         InvalidateRect(hWnd, NULL, FALSE);
                     }
                     else if (btn == 4) { // 画笔
-                        finalizeEditingText();
+                        CommitEditingText();
                         g_selectedTextIndex = -1;
                         if (g_annotationMode == ANNOTATION_PENCIL) {
                             g_annotationMode = ANNOTATION_NONE;
@@ -2734,7 +2887,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
                         InvalidateRect(hWnd, NULL, FALSE);
                     }
                     else if (btn == 5) { // 文字
-                        finalizeEditingText();
+                        CommitEditingText();
                         g_selectedTextIndex = -1;
                         if (g_annotationMode == ANNOTATION_TEXT) {
                             g_annotationMode = ANNOTATION_NONE;
@@ -2746,34 +2899,18 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
                     else if (btn == 6) { // 撤销
                         g_selectedTextIndex = -1;
                         if (g_isEditingText) {
-                            g_isEditingText = false;
-                            g_editingText = L"";
-                            g_editingCaretIndex = 0;
+                            ResetEditingTextState();
                         } else if (!g_shapes.empty()) {
                             g_shapes.pop_back();
                         }
                         InvalidateRect(hWnd, NULL, FALSE);
                     }
                     else if (btn == 7) { // 保存
-                        finalizeEditingText();
+                        CommitEditingText();
                         g_selectedTextIndex = -1;
                         HBITMAP hBmp = CropScreenCapture(g_overlay.selection);
                         if (hBmp) {
-                            CopyBitmapToClipboard(hBmp);
-                            
-                            OPENFILENAME ofn = { 0 };
-                            wchar_t fileSz[MAX_PATH] = L"screenshot.png";
-                            ofn.lStructSize = sizeof(ofn);
-                            ofn.hwndOwner = hWnd;
-                            ofn.lpstrFilter = L"PNG Image\0*.png\0";
-                            ofn.lpstrFile = fileSz;
-                            ofn.nMaxFile = MAX_PATH;
-                            ofn.Flags = OFN_PATHMUSTEXIST | OFN_OVERWRITEPROMPT;
-                            ofn.lpstrDefExt = L"png";
-                            
-                            if (GetSaveFileName(&ofn)) {
-                                SaveBitmapToFile(hBmp, ofn.lpstrFile);
-                            }
+                            FinalizeCaptureOutput(hWnd, hBmp, true, NULL);
                             DeleteObject(hBmp);
                         }
                         SendMessage(hWnd, WM_CLOSE, 0, 0);
@@ -2782,11 +2919,11 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
                         SendMessage(hWnd, WM_CLOSE, 0, 0);
                     }
                     else if (btn == 9) { // 确定
-                        finalizeEditingText();
+                        CommitEditingText();
                         g_selectedTextIndex = -1;
                         HBITMAP hBmp = CropScreenCapture(g_overlay.selection);
                         if (hBmp) {
-                            CopyBitmapToClipboard(hBmp);
+                            FinalizeCaptureOutput(hWnd, hBmp, false, NULL);
                             DeleteObject(hBmp);
                         }
                         SendMessage(hWnd, WM_CLOSE, 0, 0);
@@ -2957,22 +3094,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
                         
                         if (!hitExistingText) {
                             // 提交上一次编辑中的文字
-                            if (g_isEditingText && !g_editingText.empty()) {
-                                DrawingShape textShape;
-                                textShape.type = SHAPE_TEXT;
-                                textShape.start = g_editTextPos;
-                                textShape.end = g_editTextPos;
-                                textShape.color = g_currentColor;
-                                textShape.thickness = g_currentThickness;
-                                textShape.text = g_editingText;
-                                textShape.angle = g_editAngle;
-                                textShape.scale = g_editScale;
-                                textShape.fontSize = g_currentFontSize;
-                                textShape.fontFamily = g_currentFontFamily;
-                                textShape.origW = 0.0f;
-                                textShape.origH = 0.0f;
-                                g_shapes.push_back(textShape);
-                            }
+                            CommitEditingText();
                             // 点击空白，清除选择
                             g_selectedTextIndex = -1;
                             
@@ -3183,31 +3305,10 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
                     InvalidateRect(hWnd, NULL, FALSE);
                 } else if (wParam == VK_RETURN) {
                     // 回车确认文字
-                    if (!g_editingText.empty()) {
-                        DrawingShape textShape;
-                        textShape.type = SHAPE_TEXT;
-                        textShape.start = g_editTextPos;
-                        textShape.end = g_editTextPos;
-                        textShape.color = g_currentColor;
-                        textShape.thickness = g_currentThickness;
-                        textShape.text = g_editingText;
-                        textShape.angle = g_editAngle;
-                        textShape.scale = g_editScale;
-                        textShape.fontSize = g_currentFontSize;
-                        textShape.fontFamily = g_currentFontFamily;
-                        textShape.fontStyle = g_currentFontStyle;
-                        textShape.origW = 0.0f;
-                        textShape.origH = 0.0f;
-                        g_shapes.push_back(textShape);
-                    }
-                    g_isEditingText = false;
-                    g_editingText = L"";
-                    g_editingCaretIndex = 0;
+                    CommitEditingText();
                     InvalidateRect(hWnd, NULL, FALSE);
                 } else if (wParam == VK_ESCAPE) {
-                    g_isEditingText = false;
-                    g_editingText = L"";
-                    g_editingCaretIndex = 0;
+                    ResetEditingTextState();
                     InvalidateRect(hWnd, NULL, FALSE);
                 }
                 break;
@@ -3288,30 +3389,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
             break;
         }
         case WM_CLOSE: {
-            g_overlay.selectionDone = false;
-            g_overlay.selection = { 0, 0, 0, 0 };
-            g_overlay.hasDetectedWindow = false;
-            g_overlay.isPossibleClick = false;
-            g_overlay.isSelecting = false;
-            g_overlay.isResizing = false;
-            g_isDrawingShape = false;
-            g_isEditingText = false;
-            g_editingText = L"";
-            g_isDraggingText = false;
-            g_draggingTextIndex = -1;
-            g_selectedTextIndex = -1;
-            g_isRotatingText = false;
-            g_rotatingTextIndex = -1;
-            g_isResizingText = false;
-            g_resizingTextIndex = -1;
-            g_editAngle = 0.0f;
-            g_editScale = 1.0f;
-            g_currentFontSize = 24;
-            g_currentFontFamily = L"Microsoft YaHei";
-            g_currentColor = Color(255, 231, 76, 60);
-            g_currentThickness = 4;
-            g_shapes.clear();
-            g_annotationMode = ANNOTATION_NONE;
+            ResetOverlaySessionState();
             KillTimer(hWnd, 1);
             DestroyWindow(hWnd);
             g_hWndOverlay = NULL;
@@ -3424,19 +3502,8 @@ void TriggerCapture() {
     wcex.lpszClassName = L"CaptureToolOverlayClass";
     RegisterClassEx(&wcex);
     
-    g_overlay.selection = { 0, 0, 0, 0 };
-    g_overlay.selectionDone = false;
-    g_overlay.isSelecting = false;
-    g_overlay.isResizing = false;
-    g_overlay.hasDetectedWindow = false;
-    g_overlay.isPossibleClick = false;
-    g_isDrawingShape = false;
-    g_selectedTextIndex = -1;
-    g_isRotatingText = false;
-    g_rotatingTextIndex = -1;
-    g_isResizingText = false;
-    g_resizingTextIndex = -1;
-    
+    ResetOverlaySessionState();
+
     g_hWndOverlay = CreateWindowEx(
         WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
         L"CaptureToolOverlayClass",
@@ -3501,49 +3568,72 @@ void MakeButtonFlat(HWND hBtn) {
 LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) {
     static HWND hCheckSuppress = NULL;
     static HWND hCheckAutostart = NULL;
+    static HWND hCheckClipboard = NULL;
+    static HWND hCheckNotification = NULL;
+    static HWND hCheckWindowMode = NULL;
+    static HWND hBtnSaveDir = NULL;
+    static HWND hStaticSaveDir = NULL;
     static HWND hBtnSave = NULL;
     static HWND hStaticText = NULL;
     static HWND hBtnRecord = NULL;
     
     static bool s_suppress = false;
     static bool s_autostart = false;
+    static bool s_clipboard = true;
+    static bool s_notification = true;
+    static bool s_windowMode = false;
+    static wstring s_saveDirectory;
     
     switch (message) {
         case WM_CREATE: {
             s_suppress = g_config.hotkey.suppress;
             s_autostart = g_config.auto_start;
-            
+            s_clipboard = g_config.save_to_clipboard;
+            s_notification = g_config.notification;
+            s_windowMode = IsWindowCaptureMode();
+            s_saveDirectory = g_config.save_directory;
+
             // 背景与基本 UI 控件创建 (极简现代暗黑风，去除任何丑陋的 Win32 控件背景)
             HBRUSH hGray = CreateSolidBrush(RGB(30, 30, 30));
             SetClassLongPtr(hWnd, GCLP_HBRBACKGROUND, (LONG_PTR)hGray);
-            
+
             HFONT hFont = CreateFont(20, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_OUTLINE_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei");
             HFONT hTextFont = CreateFont(15, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_OUTLINE_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei");
-            
-            // 标题 (无 Emoji，精致大方)
-            HWND hTitle = CreateWindow(L"STATIC", L"CaptureTool 设置", WS_VISIBLE | WS_CHILD | SS_CENTER, 20, 20, 424, 30, hWnd, NULL, g_hInstance, NULL);
+
+            HWND hTitle = CreateWindow(L"STATIC", L"CaptureTool 设置", WS_VISIBLE | WS_CHILD | SS_CENTER, 20, 20, 504, 30, hWnd, NULL, g_hInstance, NULL);
             SendMessage(hTitle, WM_SETFONT, (WPARAM)hFont, TRUE);
-            
-            // 提示区
-            g_recordedHotkey = g_config.hotkey; // 暂存热键
+
+            g_recordedHotkey = g_config.hotkey;
             wstring hotkeyText = L"当前快捷键: " + FormatHotkeyConfig(g_config.hotkey);
-            hStaticText = CreateWindow(L"STATIC", hotkeyText.c_str(), WS_VISIBLE | WS_CHILD | SS_CENTER, 20, 65, 424, 25, hWnd, NULL, g_hInstance, NULL);
+            hStaticText = CreateWindow(L"STATIC", hotkeyText.c_str(), WS_VISIBLE | WS_CHILD | SS_CENTER, 20, 65, 504, 25, hWnd, NULL, g_hInstance, NULL);
             SendMessage(hStaticText, WM_SETFONT, (WPARAM)hTextFont, TRUE);
-            
-            // 录入新快捷键按钮 (Owner Draw，扁平风格，无 Emoji)
-            hBtnRecord = CreateWindow(L"BUTTON", L"录入新快捷键", WS_VISIBLE | WS_CHILD | BS_OWNERDRAW, 132, 105, 200, 38, hWnd, (HMENU)1002, g_hInstance, NULL);
+
+            hBtnRecord = CreateWindow(L"BUTTON", L"录入新快捷键", WS_VISIBLE | WS_CHILD | BS_OWNERDRAW, 172, 105, 200, 38, hWnd, (HMENU)1002, g_hInstance, NULL);
             MakeButtonFlat(hBtnRecord);
-            
-            // 复选框 - 吞噬 (Owner Draw 绘制成极致扁平暗黑复选框)
-            hCheckSuppress = CreateWindow(L"BUTTON", L"阻止其他应用接收此按键", WS_VISIBLE | WS_CHILD | BS_OWNERDRAW, 70, 165, 320, 28, hWnd, (HMENU)1003, g_hInstance, NULL);
+
+            hCheckSuppress = CreateWindow(L"BUTTON", L"阻止其他应用接收此按键", WS_VISIBLE | WS_CHILD | BS_OWNERDRAW, 70, 165, 380, 28, hWnd, (HMENU)1003, g_hInstance, NULL);
             MakeButtonFlat(hCheckSuppress);
-            
-            // 复选框 - 自启动
-            hCheckAutostart = CreateWindow(L"BUTTON", L"开机自启动", WS_VISIBLE | WS_CHILD | BS_OWNERDRAW, 70, 205, 320, 28, hWnd, (HMENU)1004, g_hInstance, NULL);
+
+            hCheckAutostart = CreateWindow(L"BUTTON", L"开机自启动", WS_VISIBLE | WS_CHILD | BS_OWNERDRAW, 70, 200, 380, 28, hWnd, (HMENU)1004, g_hInstance, NULL);
             MakeButtonFlat(hCheckAutostart);
-            
-            // 保存按钮 (Owner Draw，扁平风格，无 Emoji)
-            hBtnSave = CreateWindow(L"BUTTON", L"保存设置", WS_VISIBLE | WS_CHILD | BS_OWNERDRAW, 132, 265, 200, 44, hWnd, (HMENU)1001, g_hInstance, NULL);
+
+            hCheckClipboard = CreateWindow(L"BUTTON", L"截图后复制到剪贴板", WS_VISIBLE | WS_CHILD | BS_OWNERDRAW, 70, 235, 380, 28, hWnd, (HMENU)1005, g_hInstance, NULL);
+            MakeButtonFlat(hCheckClipboard);
+
+            hCheckNotification = CreateWindow(L"BUTTON", L"截图完成后显示托盘通知", WS_VISIBLE | WS_CHILD | BS_OWNERDRAW, 70, 270, 380, 28, hWnd, (HMENU)1006, g_hInstance, NULL);
+            MakeButtonFlat(hCheckNotification);
+
+            hCheckWindowMode = CreateWindow(L"BUTTON", L"默认窗口模式（关闭则为区域模式）", WS_VISIBLE | WS_CHILD | BS_OWNERDRAW, 70, 305, 420, 28, hWnd, (HMENU)1007, g_hInstance, NULL);
+            MakeButtonFlat(hCheckWindowMode);
+
+            wstring saveDirText = s_saveDirectory.empty() ? L"自动保存目录: 未设置" : (L"自动保存目录: " + s_saveDirectory);
+            hStaticSaveDir = CreateWindow(L"STATIC", saveDirText.c_str(), WS_VISIBLE | WS_CHILD | SS_LEFT, 40, 350, 460, 40, hWnd, NULL, g_hInstance, NULL);
+            SendMessage(hStaticSaveDir, WM_SETFONT, (WPARAM)hTextFont, TRUE);
+
+            hBtnSaveDir = CreateWindow(L"BUTTON", L"选择自动保存目录", WS_VISIBLE | WS_CHILD | BS_OWNERDRAW, 172, 395, 200, 38, hWnd, (HMENU)1008, g_hInstance, NULL);
+            MakeButtonFlat(hBtnSaveDir);
+
+            hBtnSave = CreateWindow(L"BUTTON", L"保存设置", WS_VISIBLE | WS_CHILD | BS_OWNERDRAW, 172, 455, 200, 44, hWnd, (HMENU)1001, g_hInstance, NULL);
             MakeButtonFlat(hBtnSave);
             break;
         }
@@ -3570,13 +3660,13 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
             SolidBrush bgBrush(Color(255, 30, 30, 30));
             g.FillRectangle(&bgBrush, (int)r.left, (int)r.top, (int)(r.right - r.left), (int)(r.bottom - r.top));
             
-            if (id == 1001 || id == 1002) { // 按钮绘制：保存按钮 (1001) 或 录入按钮 (1002)
+            if (id == 1001 || id == 1002 || id == 1008) { // 主按钮绘制：保存 / 录入 / 选择目录
                 Color btnColor;
                 if (id == 1001) { // 保存设置：现代高保真扁平绿
                     if (isPressed) btnColor = Color(255, 30, 130, 70);
                     else if (isHovered) btnColor = Color(255, 46, 204, 113);
                     else btnColor = Color(255, 39, 174, 96);
-                } else { // 录入快捷键：现代扁平深灰/蓝
+                } else { // 次级操作按钮：现代扁平深灰/蓝
                     if (isPressed) btnColor = Color(255, 30, 40, 50);
                     else if (isHovered) btnColor = Color(255, 52, 152, 219);
                     else btnColor = Color(255, 52, 73, 94);
@@ -3597,8 +3687,13 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
                 SolidBrush textBrush(Color(255, 255, 255, 255));
                 g.DrawString(text, -1, &font, RectF((REAL)r.left, (REAL)r.top, (REAL)(r.right - r.left), (REAL)(r.bottom - r.top)), &format, &textBrush);
             }
-            else if (id == 1003 || id == 1004) { // 复选框绘制：阻止接收 (1003) 或 开机自启 (1004)
-                bool isChecked = (id == 1003) ? s_suppress : s_autostart;
+            else if (id >= 1003 && id <= 1007) { // 复选框绘制
+                bool isChecked = false;
+                if (id == 1003) isChecked = s_suppress;
+                else if (id == 1004) isChecked = s_autostart;
+                else if (id == 1005) isChecked = s_clipboard;
+                else if (id == 1006) isChecked = s_notification;
+                else if (id == 1007) isChecked = s_windowMode;
                 
                 // 绘制自制方正精致暗黑复选框
                 int boxSize = 16;
@@ -3706,14 +3801,18 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
                 g_config.hotkey = g_recordedHotkey;
                 g_config.hotkey.suppress = s_suppress;
                 g_config.auto_start = s_autostart;
-                
+                g_config.save_to_clipboard = s_clipboard;
+                g_config.notification = s_notification;
+                g_config.capture_mode = s_windowMode ? L"window" : L"region";
+                g_config.save_directory = s_saveDirectory;
+
                 SaveConfig();
                 ApplyAutostart();
-                
+
                 // 重启 hook 生效新热键
                 StopHooks();
                 StartHooks();
-                
+
                 MessageBox(hWnd, L"设置已成功保存", L"CaptureTool", MB_OK | MB_ICONINFORMATION);
                 SendMessage(hWnd, WM_CLOSE, 0, 0);
             }
@@ -3731,6 +3830,34 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
             else if (LOWORD(wParam) == 1004) {
                 s_autostart = !s_autostart;
                 InvalidateRect(hCheckAutostart, NULL, FALSE);
+            }
+            else if (LOWORD(wParam) == 1005) {
+                s_clipboard = !s_clipboard;
+                InvalidateRect(hCheckClipboard, NULL, FALSE);
+            }
+            else if (LOWORD(wParam) == 1006) {
+                s_notification = !s_notification;
+                InvalidateRect(hCheckNotification, NULL, FALSE);
+            }
+            else if (LOWORD(wParam) == 1007) {
+                s_windowMode = !s_windowMode;
+                InvalidateRect(hCheckWindowMode, NULL, FALSE);
+            }
+            else if (LOWORD(wParam) == 1008) {
+                BROWSEINFOW bi = { 0 };
+                bi.hwndOwner = hWnd;
+                bi.lpszTitle = L"选择截图自动保存目录";
+                bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
+                LPITEMIDLIST pidl = SHBrowseForFolderW(&bi);
+                if (pidl) {
+                    wchar_t selectedPath[MAX_PATH] = { 0 };
+                    if (SHGetPathFromIDListW(pidl, selectedPath)) {
+                        s_saveDirectory = selectedPath;
+                        wstring saveDirText = L"自动保存目录: " + s_saveDirectory;
+                        SetWindowText(hStaticSaveDir, saveDirText.c_str());
+                    }
+                    CoTaskMemFree(pidl);
+                }
             }
             break;
         }
@@ -3759,7 +3886,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                 GetCursorPos(&pt);
                 
                 HMENU hMenu = CreatePopupMenu();
-                AppendMenu(hMenu, MF_STRING, ID_TRAY_CAPTURE, L"区域截图");
+                AppendMenu(hMenu, MF_STRING, ID_TRAY_CAPTURE, L"开始截图");
                 AppendMenu(hMenu, MF_STRING, ID_TRAY_SETTINGS, L"设置中心");
                 AppendMenu(hMenu, MF_STRING, ID_TRAY_AUTOSTART, L"开机自启动");
                 AppendMenu(hMenu, MF_SEPARATOR, 0, NULL);
@@ -3798,8 +3925,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                     
                     int sw = GetSystemMetrics(SM_CXSCREEN);
                     int sh = GetSystemMetrics(SM_CYSCREEN);
-                    int wWidth = 480;
-                    int wHeight = 380;
+                    int wWidth = 560;
+                    int wHeight = 560;
                     int wx = (sw - wWidth) / 2;
                     int wy = (sh - wHeight) / 2;
                     
