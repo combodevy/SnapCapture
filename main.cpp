@@ -19,6 +19,7 @@
 #include <cstdio>
 #include <dwmapi.h>
 #include <commdlg.h>
+#include <imm.h>
 
 #pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "gdiplus.lib")
@@ -28,6 +29,7 @@
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "comdlg32.lib")
+#pragma comment(lib, "imm32.lib")
 
 #ifndef DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
 #define DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 ((HANDLE)-4)
@@ -161,6 +163,13 @@ bool g_isHoveringRoundRadius = false;
 wstring g_editingRoundRadiusStr = L"";
 int g_currentFontStyle = 0; // 字体样式预设
 int g_editingCaretIndex = 0; // 正在编辑文字的光标索引
+
+// 输入法 (IME) 组合输入状态：用于内联显示拼音组合串与定位候选窗口
+bool g_imeComposing = false;
+wstring g_imeComposition = L"";
+int g_imeCaretInComposition = 0;
+float g_editCaretScreenX = 0.0f; // 当前光标在屏幕坐标系中的位置
+float g_editCaretScreenY = 0.0f;
 
 // 文字标注状态
 bool g_isEditingText = false;
@@ -471,6 +480,53 @@ void ResetEditingTextState() {
     g_editingCaretIndex = 0;
     g_isDraggingEditingText = false;
     g_editingTextDragOffset = { 0, 0 };
+    g_imeComposing = false;
+    g_imeComposition = L"";
+    g_imeCaretInComposition = 0;
+}
+
+// 读取输入法当前组合串与组合内光标位置（仅用于显示，最终上屏仍走 WM_CHAR）
+void UpdateImeComposition(HWND hWnd, LPARAM lParam) {
+    HIMC hIMC = ImmGetContext(hWnd);
+    if (!hIMC) return;
+
+    if (lParam & GCS_COMPSTR) {
+        LONG bytes = ImmGetCompositionString(hIMC, GCS_COMPSTR, NULL, 0);
+        if (bytes > 0) {
+            vector<wchar_t> buf((size_t)(bytes / sizeof(wchar_t)) + 2, L'\0');
+            LONG copied = ImmGetCompositionString(hIMC, GCS_COMPSTR, buf.data(), bytes);
+            if (copied > 0) {
+                g_imeComposition.assign(buf.data(), (size_t)(copied / sizeof(wchar_t)));
+            } else {
+                g_imeComposition.clear();
+            }
+        } else {
+            g_imeComposition.clear();
+        }
+    }
+
+    if (lParam & GCS_CURSORPOS) {
+        LONG pos = ImmGetCompositionString(hIMC, GCS_CURSORPOS, NULL, 0);
+        g_imeCaretInComposition = (pos > 0) ? (int)pos : 0;
+        if (g_imeCaretInComposition > (int)g_imeComposition.length()) {
+            g_imeCaretInComposition = (int)g_imeComposition.length();
+        }
+    }
+
+    ImmReleaseContext(hWnd, hIMC);
+}
+
+// 把输入法候选/组合窗口挪到当前文字光标下方，避免它固定在屏幕左下角
+void UpdateImeWindowPosition(HWND hWnd) {
+    HIMC hIMC = ImmGetContext(hWnd);
+    if (!hIMC) return;
+
+    COMPOSITIONFORM cf;
+    cf.dwStyle = CFS_POINT;
+    cf.ptCurrentPos.x = (LONG)g_editCaretScreenX;
+    cf.ptCurrentPos.y = (LONG)g_editCaretScreenY;
+    ImmSetCompositionWindow(hIMC, &cf);
+    ImmReleaseContext(hWnd, hIMC);
 }
 
 bool CommitEditingText() {
@@ -1585,48 +1641,97 @@ void DrawOverlay(HWND hWnd, HDC hdc) {
             }
         }
         
-        // 绘制正在编辑中的文字（带光标）
+        // 绘制正在编辑中的文字（带光标与输入法组合串）
         if (g_isEditingText) {
             Font* pFont = CreateSafeGdiplusFont(g_currentFontFamily.c_str(), (REAL)g_currentFontSize, (FontStyle)g_currentFontStyle);
             SolidBrush txtBrush(g_currentColor);
             g.SetTextRenderingHint(TextRenderingHintAntiAlias);
-            
-            wstring displayText = g_editingText;
+
+            // 输入法的组合串临时插在光标处：前缀 + 组合串 + 后缀
+            wstring prefix = g_editingText.substr(0, g_editingCaretIndex);
+            wstring comp = g_imeComposing ? g_imeComposition : wstring();
+            wstring suffix = (g_editingCaretIndex < (int)g_editingText.length())
+                ? g_editingText.substr(g_editingCaretIndex) : wstring();
+
+            wstring displayText = prefix + comp + suffix;
             if (displayText.empty()) displayText = L" ";
-            
+
             RectF cursorBound;
             g.MeasureString(displayText.c_str(), -1, pFont, PointF(0, 0), &cursorBound);
             float ew = cursorBound.Width;
             float eh = cursorBound.Height;
             float ex = cursorBound.X;
             float ey = cursorBound.Y;
-            
+
             float cx = g_editTextPos.x + ew / 2.0f;
             float cy = g_editTextPos.y + eh / 2.0f;
-            
+
+            float left = -ew / 2.0f - ex;
+            float top = -eh / 2.0f - ey;
+
+            float prefixW = 0.0f;
+            float compW = 0.0f;
+            if (!prefix.empty()) {
+                RectF b;
+                g.MeasureString(prefix.c_str(), -1, pFont, PointF(0, 0), &b);
+                prefixW = b.Width;
+            }
+            if (!comp.empty()) {
+                RectF b;
+                g.MeasureString(comp.c_str(), -1, pFont, PointF(0, 0), &b);
+                compW = b.Width;
+            }
+
             GraphicsState state = g.Save();
             g.TranslateTransform(cx, cy);
             g.RotateTransform(g_editAngle);
             g.ScaleTransform(g_editScale, g_editScale);
-            
-            g.DrawString(g_editingText.c_str(), -1, pFont, PointF(-ew / 2.0f - ex, -eh / 2.0f - ey), &txtBrush);
-            
+
+            float x = left;
+            if (!prefix.empty()) {
+                g.DrawString(prefix.c_str(), -1, pFont, PointF(x, top), &txtBrush);
+            }
+            x += prefixW;
+
+            if (!comp.empty()) {
+                g.DrawString(comp.c_str(), -1, pFont, PointF(x, top), &txtBrush);
+                Pen underlinePen(g_currentColor, 1.0f / g_editScale);
+                float uy = top + eh - 2.0f;
+                g.DrawLine(&underlinePen, x, uy, x + compW, uy);
+            }
+            x += compW;
+
+            if (!suffix.empty()) {
+                g.DrawString(suffix.c_str(), -1, pFont, PointF(x, top), &txtBrush);
+            }
+
+            // 光标位置：组合输入中跟随组合内光标，否则跟随文本光标
+            float caretX = left + prefixW;
+            if (!comp.empty() && g_imeCaretInComposition > 0) {
+                wstring compPrefix = comp.substr(0, g_imeCaretInComposition);
+                RectF b;
+                g.MeasureString(compPrefix.c_str(), -1, pFont, PointF(0, 0), &b);
+                caretX += b.Width;
+            }
+            float caretY = -eh / 2.0f + 2.0f;
+            float caretH = eh - 4.0f;
+
+            // 记录光标屏幕坐标，供输入法候选窗口定位
+            {
+                float rad = g_editAngle * 3.14159265f / 180.0f;
+                float sx = caretX * g_editScale;
+                float sy = (caretY + caretH) * g_editScale;
+                g_editCaretScreenX = cx + (sx * cos(rad) - sy * sin(rad));
+                g_editCaretScreenY = cy + (sx * sin(rad) + sy * cos(rad));
+            }
+
             // 绘制闪烁光标竖线
             DWORD tick = GetTickCount();
             if ((tick / 500) % 2 == 0) {
                 Pen cursorPen(g_currentColor, 2.0f / g_editScale);
-                float curX = -ew / 2.0f - ex;
-                if (g_editingCaretIndex > 0 && g_editingCaretIndex <= (int)g_editingText.length()) {
-                    wstring subStr = g_editingText.substr(0, g_editingCaretIndex);
-                    RectF subBound;
-                    g.MeasureString(subStr.c_str(), -1, pFont, PointF(0, 0), &subBound);
-                    curX += subBound.Width;
-                }
-                float curY = -eh / 2.0f + 2;
-                float curH = eh - 4;
-                g.DrawLine(&cursorPen, curX, curY, curX, curY + curH);
+                g.DrawLine(&cursorPen, caretX, caretY, caretX, caretY + caretH);
             }
-            
+
             // 绘制输入框虚线边框
             Pen inputBorderPen(Color(150, 0, 174, 255), 1.0f / g_editScale);
             inputBorderPen.SetDashStyle(DashStyleDash);
@@ -1635,7 +1740,7 @@ void DrawOverlay(HWND hWnd, HDC hdc) {
             float bw = max(ew + 12.0f, 40.0f);
             float bh = eh + 4;
             g.DrawRectangle(&inputBorderPen, bx, by, bw, bh);
-            
+
             g.Restore(state);
         }
         
@@ -3115,6 +3220,9 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
                             g_isEditingText = true;
                             g_editingText = L"";
                             g_editingCaretIndex = 0;
+                            g_imeComposing = false;
+                            g_imeComposition = L"";
+                            g_imeCaretInComposition = 0;
                             g_editTextPos = pt;
                             g_editAngle = 0.0f;
                             g_editScale = 1.0f;
@@ -3271,7 +3379,41 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
             SendMessage(hWnd, WM_CLOSE, 0, 0);
             break;
         }
+        case WM_IME_SETCONTEXT: {
+            // 保留默认行为以显示候选窗口，同时把组合窗口挪到文字光标处
+            LRESULT res = DefWindowProc(hWnd, message, wParam, lParam);
+            UpdateImeWindowPosition(hWnd);
+            return res;
+        }
+        case WM_IME_STARTCOMPOSITION: {
+            if (g_isEditingText) {
+                g_imeComposing = true;
+                g_imeComposition = L"";
+                g_imeCaretInComposition = 0;
+                UpdateImeWindowPosition(hWnd);
+                InvalidateRect(hWnd, NULL, FALSE);
+            }
+            return DefWindowProc(hWnd, message, wParam, lParam);
+        }
+        case WM_IME_COMPOSITION: {
+            if (g_isEditingText) {
+                UpdateImeComposition(hWnd, lParam);
+                UpdateImeWindowPosition(hWnd);
+                InvalidateRect(hWnd, NULL, FALSE);
+            }
+            // 交回默认处理，最终上屏字符仍通过 WM_CHAR 插入，避免重复输入
+            return DefWindowProc(hWnd, message, wParam, lParam);
+        }
+        case WM_IME_ENDCOMPOSITION: {
+            g_imeComposing = false;
+            g_imeComposition = L"";
+            g_imeCaretInComposition = 0;
+            InvalidateRect(hWnd, NULL, FALSE);
+            return DefWindowProc(hWnd, message, wParam, lParam);
+        }
         case WM_KEYDOWN: {
+            // 组合输入期间的按键交给输入法，不要被当成编辑命令
+            if (g_imeComposing) break;
             if (g_isHoveringRoundRadius) {
                 if (wParam == VK_BACK) {
                     if (!g_editingRoundRadiusStr.empty()) {
