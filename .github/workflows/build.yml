@@ -1,0 +1,52 @@
+name: Build Check
+
+on:
+  push:
+    branches:
+      - '**'
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Compile on Windows (MinGW-w64)
+    runs-on: windows-latest
+
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup MSYS2 / MinGW-w64
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+
+      - name: Show compiler version
+        run: g++ --version
+
+      - name: Compile
+        run: |
+          g++ -std=c++11 -O3 -mwindows -static main.cpp \
+            -lgdi32 -lgdiplus -lshlwapi -luser32 -lshell32 -lole32 -lcomdlg32 -ldwmapi -limm32 \
+            -o CaptureTool.exe
+
+      - name: Verify artifact
+        run: |
+          ls -lh CaptureTool.exe
+          test -s CaptureTool.exe
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: CaptureTool-preview
+          path: CaptureTool.exe
+          if-no-files-found: error

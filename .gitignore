@@ -3,3 +3,8 @@
 *.log
 .git/
 .vscode/
+
+# Build output
+*.exe
+dist/
+artifact/

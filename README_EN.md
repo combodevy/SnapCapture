@@ -1,14 +1,19 @@
 # SnapCapture (CaptureTool)
 
-[中文版](README.md) | [![TypeScript](https://img.shields.io/badge/TypeScript-007ACC?style=flat-square&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
+[中文版](README.md)
 
 SnapCapture is a lightweight, native Windows screenshot and annotation tool built using C++11, Win32 API, and GDI/GDI+.
 
 ## Features
 
-*   **Lightweight & No Dependencies**: Built purely with Win32 SDK and GDI+. Free of third-party UI framework dependencies. Can be statically compiled into a single standalone executable (approx. 2.6 MB).
+*   **Lightweight & No Dependencies**: Built purely with Win32 SDK and GDI+. Free of third-party UI framework dependencies. Can be statically compiled into a single standalone executable (approx. 1.2 MB with symbols stripped).
 *   **Low Resource Footprint**: Uses double-buffered rendering and partial updates. Idle memory footprint is only about 2.5 MB.
 *   **DPI-Aware**: Seamlessly supports system-level High DPI scaling and multi-monitor setups, ensuring crisp screenshot capturing and rendering.
+
+## Download
+
+Prefer not to build it yourself? Grab the latest `CaptureTool.exe` from the
+[Releases page](https://github.com/combodevy/SnapCapture/releases). No installer, and nothing is written outside its own folder.
 
 ## Core Functions
 
@@ -18,13 +23,14 @@ SnapCapture is a lightweight, native Windows screenshot and annotation tool buil
 2.  **Vector Annotation Tools**
     *   **Basic Shapes**: Draw rectangular frames (with custom, persistent round corner radius), ellipses, and vector arrows.
     *   **Properties Adjustment**: Adjust brush thickness (2px, 4px, 8px) and annotation colors via the floating toolbar (with custom color selection).
-    *   **Undo Support**: Provides a stack-based undo mechanism to sequentially retract applied annotations.
+    *   **Undo / Redo**: Step back through applied annotations and redo them again, from either the toolbar button or the keyboard.
 3.  **Text Annotation Engine**
     *   **Inline Editing**: Double-click any text element to edit it directly in-place. Supports arrow keys, Home/End cursor navigation, Backspace/Delete, and custom text insertions.
     *   **Styling & Transforms**: Easily choose font family, font size, bold, and italic options using the Windows ChooseFont dialog. Resize text proportionally via corner handles or rotate text seamlessly from 0° to 360°.
+    *   **IME Input**: Composition strings are rendered inline at the caret with an underline, and the candidate window follows the text caret instead of sticking to a screen corner.
 4.  **System Integration**
     *   **Global Hotkey**: Register a keyboard combination or mouse side buttons (Mouse4/Mouse5) as hotkeys, with optional key suppression to prevent conflicts.
-    *   **Clipboard & Saving**: Copy screenshots directly to clipboard in dual formats (`CF_DIB` for compatibility and `PNG` to preserve transparency), or save locally as a PNG.
+    *   **Clipboard & Saving**: Copies to clipboard in dual formats (`CF_DIB` for Paint and Office, `PNG` for Discord, Slack and other modern apps), or saves to disk - either via a dialog or automatically to a configured directory.
     *   **Startup on Boot**: Run at startup via the Windows Registry `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` (no admin privileges required).
 
 ## Configuration (config.json)
@@ -42,6 +48,7 @@ The configuration file is automatically generated in the same directory as the e
   "auto_start": true,
   "save_to_clipboard": true,
   "save_directory": "",
+  "notification": true,
   "round_radius": 10,
   "capture_mode": "region"
 }
@@ -60,10 +67,47 @@ The configuration file is automatically generated in the same directory as the e
    ```powershell
    .\build.ps1
    ```
-3. Compilation flags:
-   ```powershell
-   g++ -std=c++11 -O3 -mwindows -static main.cpp -lgdi32 -lgdiplus -lshlwapi -luser32 -lshell32 -lole32 -lcomdlg32 -ldwmapi -o CaptureTool.exe
-   ```
+
+### Build script parameters
+
+| Parameter | Description | Default |
+| --- | --- | --- |
+| `-OutputName` | Name of the produced executable | `CaptureTool.exe` |
+| `-Architecture` | Target architecture: `x64` or `x86` | `x64` |
+| `-Strip` | Strip symbols after linking to reduce size | Off |
+| `-Run` | Launch the executable after a successful build | Off |
+
+Example:
+
+```powershell
+.\build.ps1 -Strip -Run
+```
+
+### Compilation flags
+
+The script runs the equivalent of:
+
+```powershell
+g++ -std=c++11 -O3 -mwindows -static main.cpp -lgdi32 -lgdiplus -lshlwapi -luser32 -lshell32 -lole32 -lcomdlg32 -ldwmapi -limm32 -o CaptureTool.exe
+```
+
+## CI & Release
+
+GitHub Actions handles continuous integration and releases:
+
+*   **Build Check** (`.github/workflows/build.yml`): every push or pull request triggers a real MinGW-w64 build on `windows-latest`, and uploads `CaptureTool.exe` as a build artifact.
+*   **Release** (`.github/workflows/release.yml`): pushing a `v*` tag builds a stripped binary and publishes a GitHub Release with `CaptureTool.exe` attached.
+
+To publish a new version:
+
+```powershell
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+The Release workflow can also be triggered manually from GitHub with an explicit tag.
+
+> The compiled executable is no longer committed to the repository. Get it from the Releases page or from the Actions build artifacts.
 
 ## Usage
 
@@ -76,6 +120,25 @@ The configuration file is automatically generated in the same directory as the e
     *   Select tools (Rectangle, Circle, Arrow, Pencil, Text) from the floating toolbar.
     *   Customize color, thickness, roundness, or font styling on the fly.
 5.  **Save/Output**:
-    *   **Confirm (Checkmark icon)**: Copies to clipboard and exits.
-    *   **Save (Floppy Disk icon)**: Copies to clipboard and prompts to save as PNG.
+    *   **Confirm (Checkmark icon)**: Copies to clipboard according to config, and auto-saves a PNG when a save directory is configured.
+    *   **Save (Floppy Disk icon)**: Prompts for a PNG destination, and copies to clipboard according to config.
     *   **Cancel (Cross icon) / Esc**: Exits without saving.
+
+6.  **Keyboard shortcuts**:
+    *   `Enter` or `Ctrl + C`: confirm (copies to clipboard, and auto-saves a PNG when a save directory is set) and exit
+    *   `Ctrl + S`: save as PNG
+    *   `Ctrl + Z`: undo the last annotation
+    *   `Ctrl + Y` or `Ctrl + Shift + Z`: redo
+    *   `Esc`: exit without saving
+
+7.  **Settings**: right-click the tray icon and open Settings to change the global hotkey, clipboard copying, the auto-save directory, tray notifications, the default capture mode, and launch on boot. If the hotkey ever stops responding, use the "重新装载快捷键钩子" (reload hooks) entry in the same menu.
+
+## Known Limitations
+
+*   No scrolling / long screenshot capture, and no delayed capture.
+*   Undo rewinds in the order annotations were added; deleting a selected element is not separately undoable.
+*   Single instance: launching a second copy only shows a warning, it does not trigger a new capture.
+
+## License
+
+Released under the [MIT License](LICENSE).
