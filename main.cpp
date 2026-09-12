@@ -449,7 +449,6 @@ wstring NormalizeOcrTextForChinese(const wstring& text);
 void EnsureOcrEditControl(HWND hWnd);
 void HideOcrEditControl();
 bool IsPointInOcrEditClient(HWND hWnd, POINT pt);
-bool CopyCurrentOcrSelection();
 void UpdateOcrEditLayout(HWND hWnd);
 void ShowOcrTextInOverlay(HWND hWnd, const wstring& text);
 void DoCaptureOcr(HWND hWnd);
@@ -1033,29 +1032,6 @@ bool IsPointInOcrEditClient(HWND hWnd, POINT pt) {
     return PtInRect(&c, pt) != 0;
 }
 
-bool CopyCurrentOcrSelection() {
-    if (!g_hWndOcrEdit || !IsWindow(g_hWndOcrEdit)) return false;
-
-    int len = GetWindowTextLengthW(g_hWndOcrEdit);
-    if (len <= 0) return false;
-
-    vector<wchar_t> buffer((size_t)len + 1);
-    GetWindowTextW(g_hWndOcrEdit, buffer.data(), len + 1);
-
-    DWORD start = 0;
-    DWORD end = 0;
-    SendMessage(g_hWndOcrEdit, EM_GETSEL, (WPARAM)&start, (LPARAM)&end);
-
-    wstring text;
-    if (end > start && end <= (DWORD)len) {
-        text.assign(buffer.data() + start, buffer.data() + end);
-    } else {
-        text.assign(buffer.data());
-    }
-
-    return CopyTextToClipboard(text);
-}
-
 void UpdateOcrEditLayout(HWND hWnd) {
     if (!g_ocrPanelVisible || !g_hWndOcrEdit || !IsWindow(g_hWndOcrEdit) || !g_overlay.selectionDone) return;
 
@@ -1138,7 +1114,7 @@ void DoCaptureOcr(HWND hWnd) {
     ShowOcrTextInOverlay(hWnd, ocrText);
     InvalidateRect(hWnd, NULL, FALSE);
 
-    ShowTrayNotification(L"SnapCapture OCR", L"OCR 完成：请在截图框内拖选文字后按 Ctrl+C 复制。", NIIF_INFO);
+    ShowTrayNotification(L"SnapCapture OCR", L"OCR 完成：请直接按系统方式拖选并复制。", NIIF_INFO);
 }
 
 // ========== DPI 感知初始化 ==========
@@ -3298,8 +3274,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
             }
 
             if (g_ocrPanelVisible && g_hWndOcrEdit && IsWindow(g_hWndOcrEdit)) {
-                // 点击文本层外部时清空选区高亮，行为与常见截图工具一致
-                SendMessage(g_hWndOcrEdit, EM_SETSEL, (WPARAM)-1, 0);
+                // 点击文本层外部时仅切换焦点，交由系统默认行为清除高亮
                 SetFocus(hWnd);
             }
             
@@ -3989,18 +3964,8 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
             // 组合输入期间的按键交给输入法，不要被当成编辑命令
             if (g_imeComposing) break;
 
-            // OCR 可选文本层激活时，优先交给编辑控件处理选择/复制
+            // OCR 可选文本层激活时，完全交给系统只读编辑控件处理选择/复制逻辑
             if (g_ocrPanelVisible && g_hWndOcrEdit && IsWindow(g_hWndOcrEdit) && GetFocus() == g_hWndOcrEdit) {
-                bool ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
-                if (ctrl && wParam == 'A') {
-                    SendMessage(g_hWndOcrEdit, EM_SETSEL, 0, -1);
-                    break;
-                }
-                if (ctrl && wParam == 'C') {
-                    bool copied = CopyCurrentOcrSelection();
-                    ShowTrayNotification(L"SnapCapture OCR", copied ? L"已复制选中文字。" : L"复制失败。", copied ? NIIF_INFO : NIIF_WARNING);
-                    break;
-                }
                 if (wParam == VK_ESCAPE) {
                     g_ocrPanelVisible = false;
                     g_ocrPanelText.clear();
