@@ -448,6 +448,7 @@ bool IsCjkPunctuation(wchar_t ch);
 wstring NormalizeOcrTextForChinese(const wstring& text);
 void EnsureOcrEditControl(HWND hWnd);
 void HideOcrEditControl();
+bool IsPointInOcrEditClient(HWND hWnd, POINT pt);
 void UpdateOcrEditLayout(HWND hWnd);
 void ShowOcrTextInOverlay(HWND hWnd, const wstring& text);
 void DoCaptureOcr(HWND hWnd);
@@ -1017,6 +1018,18 @@ void HideOcrEditControl() {
         ShowWindow(g_hWndOcrEdit, SW_HIDE);
         SetWindowText(g_hWndOcrEdit, L"");
     }
+}
+
+bool IsPointInOcrEditClient(HWND hWnd, POINT pt) {
+    if (!g_ocrPanelVisible || !g_hWndOcrEdit || !IsWindow(g_hWndOcrEdit)) return false;
+    RECT rc;
+    GetWindowRect(g_hWndOcrEdit, &rc);
+    POINT lt = { rc.left, rc.top };
+    POINT rb = { rc.right, rc.bottom };
+    ScreenToClient(hWnd, &lt);
+    ScreenToClient(hWnd, &rb);
+    RECT c = { lt.x, lt.y, rb.x, rb.y };
+    return PtInRect(&c, pt) != 0;
 }
 
 void UpdateOcrEditLayout(HWND hWnd) {
@@ -2858,12 +2871,20 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
             break;
         }
         case WM_SETCURSOR: {
+            if (g_ocrPanelVisible && g_hWndOcrEdit && IsWindow(g_hWndOcrEdit) && GetFocus() == g_hWndOcrEdit) {
+                return DefWindowProc(hWnd, message, wParam, lParam);
+            }
             return TRUE;
         }
         case WM_MOUSEMOVE: {
             POINT pt;
             pt.x = LOWORD(lParam);
             pt.y = HIWORD(lParam);
+
+            if (IsPointInOcrEditClient(hWnd, pt)) {
+                SetCursor(LoadCursor(NULL, IDC_IBEAM));
+                return DefWindowProc(hWnd, message, wParam, lParam);
+            }
             
             if (g_isRotatingText && g_rotatingTextIndex >= 0 && g_rotatingTextIndex < (int)g_shapes.size()) {
                 auto& shp = g_shapes[g_rotatingTextIndex];
@@ -3251,6 +3272,11 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
             POINT pt;
             pt.x = LOWORD(lParam);
             pt.y = HIWORD(lParam);
+
+            if (IsPointInOcrEditClient(hWnd, pt)) {
+                SetFocus(g_hWndOcrEdit);
+                return DefWindowProc(hWnd, message, wParam, lParam);
+            }
             
             if (!g_overlay.selectionDone) {
                 // 开始全新框选流程 (窗口模式支持单击选窗，区域模式则直接进入拖拽框选)
@@ -3796,6 +3822,13 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
             break;
         }
         case WM_LBUTTONUP: {
+            POINT pt;
+            pt.x = LOWORD(lParam);
+            pt.y = HIWORD(lParam);
+            if (IsPointInOcrEditClient(hWnd, pt)) {
+                return DefWindowProc(hWnd, message, wParam, lParam);
+            }
+
             if (g_isRotatingText) {
                 g_isRotatingText = false;
                 g_rotatingTextIndex = -1;
@@ -3930,6 +3963,29 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
         case WM_KEYDOWN: {
             // 组合输入期间的按键交给输入法，不要被当成编辑命令
             if (g_imeComposing) break;
+
+            // OCR 可选文本层激活时，优先交给编辑控件处理选择/复制
+            if (g_ocrPanelVisible && g_hWndOcrEdit && IsWindow(g_hWndOcrEdit) && GetFocus() == g_hWndOcrEdit) {
+                bool ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+                if (ctrl && wParam == 'A') {
+                    SendMessage(g_hWndOcrEdit, EM_SETSEL, 0, -1);
+                    break;
+                }
+                if (ctrl && wParam == 'C') {
+                    SendMessage(g_hWndOcrEdit, WM_COPY, 0, 0);
+                    ShowTrayNotification(L"SnapCapture OCR", L"已复制当前选中文字。", NIIF_INFO);
+                    break;
+                }
+                if (wParam == VK_ESCAPE) {
+                    g_ocrPanelVisible = false;
+                    g_ocrPanelText.clear();
+                    HideOcrEditControl();
+                    SetFocus(hWnd);
+                    InvalidateRect(hWnd, NULL, FALSE);
+                    break;
+                }
+                return DefWindowProc(hWnd, message, wParam, lParam);
+            }
 
             // 全局编辑快捷键（正在编辑文字或圆角数值时不拦截）
             if (!g_isEditingText && !g_isHoveringRoundRadius) {
