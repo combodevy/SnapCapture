@@ -762,47 +762,92 @@ wstring EscapeDoubleQuotesForCmd(const wstring& s) {
     return out;
 }
 
+bool ReadUtf8TextFile(const wstring& path, wstring& outText) {
+    outText.clear();
+    FILE* f = _wfopen(path.c_str(), L"rb");
+    if (!f) return false;
+
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (sz < 0) {
+        fclose(f);
+        return false;
+    }
+
+    vector<char> data((size_t)sz);
+    if (sz > 0) {
+        fread(data.data(), 1, (size_t)sz, f);
+    }
+    fclose(f);
+
+    size_t start = 0;
+    if (data.size() >= 3 &&
+        (unsigned char)data[0] == 0xEF &&
+        (unsigned char)data[1] == 0xBB &&
+        (unsigned char)data[2] == 0xBF) {
+        start = 3;
+    }
+
+    if (start >= data.size()) {
+        outText = L"";
+        return true;
+    }
+
+    int wlen = MultiByteToWideChar(CP_UTF8, 0, data.data() + start, (int)(data.size() - start), NULL, 0);
+    if (wlen <= 0) return false;
+
+    outText.resize((size_t)wlen);
+    MultiByteToWideChar(CP_UTF8, 0, data.data() + start, (int)(data.size() - start), &outText[0], wlen);
+    return true;
+}
+
 bool RunWinRTOcrWithPowerShell(const wstring& imagePath, wstring& outText, wstring& outError) {
     outText.clear();
     outError.clear();
 
-    SECURITY_ATTRIBUTES sa = {};
-    sa.nLength = sizeof(sa);
-    sa.lpSecurityDescriptor = NULL;
-    sa.bInheritHandle = TRUE;
+    wchar_t tempDir[MAX_PATH] = { 0 };
+    GetTempPathW(MAX_PATH, tempDir);
 
-    HANDLE hRead = NULL;
-    HANDLE hWrite = NULL;
-    if (!CreatePipe(&hRead, &hWrite, &sa, 0)) {
-        outError = L"创建输出管道失败";
-        return false;
-    }
-    SetHandleInformation(hRead, HANDLE_FLAG_INHERIT, 0);
+    wchar_t outPathBuf[MAX_PATH] = { 0 };
+    wchar_t errPathBuf[MAX_PATH] = { 0 };
+    GetTempFileNameW(tempDir, L"SCO", 0, outPathBuf);
+    GetTempFileNameW(tempDir, L"SCE", 0, errPathBuf);
 
-    wstring escapedPath = EscapeSingleQuotesForPowerShell(imagePath);
+    wstring outPath = outPathBuf;
+    wstring errPath = errPathBuf;
+
+    wstring escapedImagePath = EscapeSingleQuotesForPowerShell(imagePath);
+    wstring escapedOutPath = EscapeSingleQuotesForPowerShell(outPath);
+    wstring escapedErrPath = EscapeSingleQuotesForPowerShell(errPath);
+
     wstring script =
         L"$ErrorActionPreference='Stop';"
+        L"$img='" + escapedImagePath + L"';"
+        L"$out='" + escapedOutPath + L"';"
+        L"$err='" + escapedErrPath + L"';"
         L"Add-Type -AssemblyName System.Runtime.WindowsRuntime;"
-        L"$path='" + escapedPath + L"';"
-        L"$file=[System.WindowsRuntimeSystemExtensions]::AsTask([Windows.Storage.StorageFile,Windows.Storage,ContentType=WindowsRuntime]::GetFileFromPathAsync($path)).Result;"
+        L"try {"
+        L"$file=[System.WindowsRuntimeSystemExtensions]::AsTask([Windows.Storage.StorageFile,Windows.Storage,ContentType=WindowsRuntime]::GetFileFromPathAsync($img)).Result;"
         L"$stream=[System.WindowsRuntimeSystemExtensions]::AsTask($file.OpenAsync([Windows.Storage.FileAccessMode]::Read)).Result;"
         L"$decoder=[System.WindowsRuntimeSystemExtensions]::AsTask([Windows.Graphics.Imaging.BitmapDecoder,Windows.Graphics.Imaging,ContentType=WindowsRuntime]::CreateAsync($stream)).Result;"
         L"$bmp=[System.WindowsRuntimeSystemExtensions]::AsTask($decoder.GetSoftwareBitmapAsync()).Result;"
         L"$engine=[Windows.Media.Ocr.OcrEngine,Windows.Foundation,ContentType=WindowsRuntime]::TryCreateFromUserProfileLanguages();"
-        L"if($null -eq $engine){throw 'OcrEngine unavailable';}"
+        L"if($null -eq $engine){ throw 'Windows.Media.Ocr.OcrEngine unavailable'; }"
         L"$res=[System.WindowsRuntimeSystemExtensions]::AsTask($engine.RecognizeAsync($bmp)).Result;"
-        L"[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;"
-        L"Write-Output $res.Text;";
+        L"[System.IO.File]::WriteAllText($out, $res.Text, [System.Text.UTF8Encoding]::new($false));"
+        L"exit 0;"
+        L"} catch {"
+        L"[System.IO.File]::WriteAllText($err, $_.Exception.Message, [System.Text.UTF8Encoding]::new($false));"
+        L"exit 1;"
+        L"}";
 
     wstring commandLine = L"powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"" + EscapeDoubleQuotesForCmd(script) + L"\"";
 
     STARTUPINFOW si = {};
     si.cb = sizeof(si);
-    si.dwFlags = STARTF_USESHOWWINDOW | STARTF_USESTDHANDLES;
+    si.dwFlags = STARTF_USESHOWWINDOW;
     si.wShowWindow = SW_HIDE;
-    si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
-    si.hStdOutput = hWrite;
-    si.hStdError = hWrite;
 
     PROCESS_INFORMATION pi = {};
     vector<wchar_t> cmdBuf(commandLine.begin(), commandLine.end());
@@ -813,7 +858,7 @@ bool RunWinRTOcrWithPowerShell(const wstring& imagePath, wstring& outText, wstri
         cmdBuf.data(),
         NULL,
         NULL,
-        TRUE,
+        FALSE,
         CREATE_NO_WINDOW,
         NULL,
         NULL,
@@ -821,45 +866,32 @@ bool RunWinRTOcrWithPowerShell(const wstring& imagePath, wstring& outText, wstri
         &pi
     );
 
-    CloseHandle(hWrite);
-
     if (!created) {
-        CloseHandle(hRead);
+        DeleteFileW(outPath.c_str());
+        DeleteFileW(errPath.c_str());
         outError = L"启动 PowerShell OCR 子进程失败";
         return false;
-    }
-
-    string raw;
-    const DWORD chunkSize = 4096;
-    char chunk[chunkSize];
-    DWORD bytesRead = 0;
-    while (ReadFile(hRead, chunk, chunkSize, &bytesRead, NULL) && bytesRead > 0) {
-        raw.append(chunk, chunk + bytesRead);
     }
 
     WaitForSingleObject(pi.hProcess, 60000);
 
     DWORD exitCode = 0;
     GetExitCodeProcess(pi.hProcess, &exitCode);
-
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
-    CloseHandle(hRead);
 
-    if (!raw.empty()) {
-        int wlen = MultiByteToWideChar(CP_UTF8, 0, raw.c_str(), (int)raw.size(), NULL, 0);
-        if (wlen > 0) {
-            outText.resize((size_t)wlen);
-            MultiByteToWideChar(CP_UTF8, 0, raw.c_str(), (int)raw.size(), &outText[0], wlen);
-        }
-    }
+    ReadUtf8TextFile(outPath, outText);
+    ReadUtf8TextFile(errPath, outError);
+
+    DeleteFileW(outPath.c_str());
+    DeleteFileW(errPath.c_str());
 
     while (!outText.empty() && (outText.back() == L'\r' || outText.back() == L'\n' || outText.back() == L' ' || outText.back() == L'\t')) {
         outText.pop_back();
     }
 
     if (exitCode != 0) {
-        outError = outText.empty() ? L"OCR 识别失败" : outText;
+        if (outError.empty()) outError = L"OCR 识别失败";
         outText.clear();
         return false;
     }
@@ -873,7 +905,7 @@ void DoCaptureOcr(HWND hWnd) {
 
     HBITMAP hBmp = CropScreenCapture(g_overlay.selection);
     if (!hBmp) {
-        ShowTrayNotification(L"SnapCapture OCR", L"OCR 失败：选区无效。", NIIF_WARNING);
+        MessageBox(hWnd, L"OCR 失败：选区无效。", L"SnapCapture OCR", MB_OK | MB_ICONWARNING);
         return;
     }
 
@@ -885,7 +917,7 @@ void DoCaptureOcr(HWND hWnd) {
     DeleteObject(hBmp);
 
     if (!saved) {
-        ShowTrayNotification(L"SnapCapture OCR", L"OCR 失败：临时图像保存失败。", NIIF_WARNING);
+        MessageBox(hWnd, L"OCR 失败：临时图像保存失败。", L"SnapCapture OCR", MB_OK | MB_ICONWARNING);
         return;
     }
 
@@ -895,19 +927,33 @@ void DoCaptureOcr(HWND hWnd) {
     DeleteFileW(tempFile.c_str());
 
     if (!ok) {
-        ShowTrayNotification(L"SnapCapture OCR", L"OCR 识别失败，请确认系统组件可用。", NIIF_WARNING);
+        wstring msg = L"OCR 识别失败。\n\n";
+        msg += ocrError.empty() ? L"请确认系统 OCR 组件可用。" : ocrError;
+        MessageBox(hWnd, msg.c_str(), L"SnapCapture OCR", MB_OK | MB_ICONWARNING);
         return;
     }
 
     if (ocrText.empty()) {
-        ShowTrayNotification(L"SnapCapture OCR", L"识别完成：未检测到可读文字。", NIIF_INFO);
+        MessageBox(hWnd, L"识别完成：未检测到可读文字。", L"SnapCapture OCR", MB_OK | MB_ICONINFORMATION);
         return;
     }
 
-    if (CopyTextToClipboard(ocrText)) {
-        ShowTrayNotification(L"SnapCapture OCR", L"OCR 文字已复制到剪贴板。", NIIF_INFO);
+    bool copied = CopyTextToClipboard(ocrText);
+
+    wstring txtPath = JoinPath(tempDir, L"SnapCapture_OCR_" + BuildTimestampedScreenshotName() + L".txt");
+    FILE* tf = _wfopen(txtPath.c_str(), L"wt, ccs=UTF-8");
+    if (tf) {
+        fwprintf(tf, L"%ls", ocrText.c_str());
+        fclose(tf);
+
+        wstring params = L"\"" + txtPath + L"\"";
+        ShellExecuteW(NULL, L"open", L"notepad.exe", params.c_str(), NULL, SW_SHOWNORMAL);
+    }
+
+    if (copied) {
+        ShowTrayNotification(L"SnapCapture OCR", L"OCR 识别成功：已复制到剪贴板，并打开文本结果。", NIIF_INFO);
     } else {
-        ShowTrayNotification(L"SnapCapture OCR", L"OCR 完成，但复制到剪贴板失败。", NIIF_WARNING);
+        ShowTrayNotification(L"SnapCapture OCR", L"OCR 识别成功：已打开文本结果（剪贴板复制失败）。", NIIF_WARNING);
     }
 }
 
