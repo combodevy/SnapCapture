@@ -948,20 +948,18 @@ void DoCaptureOcr(HWND hWnd) {
 
     bool copied = CopyTextToClipboard(ocrText);
 
-    wstring txtPath = JoinPath(tempDir, L"SnapCapture_OCR_" + BuildTimestampedScreenshotName() + L".txt");
-    FILE* tf = _wfopen(txtPath.c_str(), L"wt, ccs=UTF-8");
-    if (tf) {
-        fwprintf(tf, L"%ls", ocrText.c_str());
-        fclose(tf);
-
-        wstring params = L"\"" + txtPath + L"\"";
-        ShellExecuteW(NULL, L"open", L"notepad.exe", params.c_str(), NULL, SW_SHOWNORMAL);
+    wstring preview = ocrText;
+    if (preview.length() > 180) {
+        preview = preview.substr(0, 180) + L"...";
     }
 
     if (copied) {
-        ShowTrayNotification(L"SnapCapture OCR", L"OCR 识别成功：已复制到剪贴板，并打开文本结果。", NIIF_INFO);
+        ShowTrayNotification(L"SnapCapture OCR", L"OCR 识别成功：文字已复制到剪贴板。", NIIF_INFO);
+        wstring tip = L"OCR 已完成，文本已复制到剪贴板。\n\n预览：\n" + preview;
+        MessageBox(hWnd, tip.c_str(), L"SnapCapture OCR", MB_OK | MB_ICONINFORMATION);
     } else {
-        ShowTrayNotification(L"SnapCapture OCR", L"OCR 识别成功：已打开文本结果（剪贴板复制失败）。", NIIF_WARNING);
+        wstring tip = L"OCR 完成，但复制到剪贴板失败。\n\n识别结果：\n" + preview;
+        MessageBox(hWnd, tip.c_str(), L"SnapCapture OCR", MB_OK | MB_ICONWARNING);
     }
 }
 
