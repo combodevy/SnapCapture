@@ -443,6 +443,9 @@ void DoCaptureConfirm(HWND hWnd);
 void DoCaptureSaveAs(HWND hWnd);
 bool CopyTextToClipboard(const wstring& text);
 bool RunWinRTOcrWithPowerShell(const wstring& imagePath, wstring& outText, wstring& outError);
+bool IsCjkChar(wchar_t ch);
+bool IsCjkPunctuation(wchar_t ch);
+wstring NormalizeOcrTextForChinese(const wstring& text);
 void EnsureOcrEditControl(HWND hWnd);
 void HideOcrEditControl();
 void UpdateOcrEditLayout(HWND hWnd);
@@ -772,6 +775,69 @@ wstring EscapeDoubleQuotesForCmd(const wstring& s) {
     return out;
 }
 
+bool IsCjkChar(wchar_t ch) {
+    return (ch >= 0x4E00 && ch <= 0x9FFF) ||
+           (ch >= 0x3400 && ch <= 0x4DBF) ||
+           (ch >= 0xF900 && ch <= 0xFAFF) ||
+           (ch >= 0x3040 && ch <= 0x30FF) ||
+           (ch >= 0xAC00 && ch <= 0xD7AF);
+}
+
+bool IsCjkPunctuation(wchar_t ch) {
+    switch (ch) {
+        case L'，': case L'。': case L'、': case L'；': case L'：':
+        case L'！': case L'？': case L'（': case L'）': case L'【':
+        case L'】': case L'《': case L'》': case L'“': case L'”':
+        case L'‘': case L'’': case L'「': case L'」': case L'『':
+        case L'』': case L'—': case L'…': case L'·':
+            return true;
+        default:
+            return false;
+    }
+}
+
+wstring NormalizeOcrTextForChinese(const wstring& text) {
+    wstring out;
+    out.reserve(text.size());
+
+    for (size_t i = 0; i < text.size(); ++i) {
+        wchar_t ch = text[i];
+
+        if (ch == L'\r') continue;
+
+        if (ch == L'\n') {
+            while (!out.empty() && (out.back() == L' ' || out.back() == L'\t')) out.pop_back();
+            out.push_back(L'\n');
+            continue;
+        }
+
+        if (ch == L' ' || ch == L'\t') {
+            size_t j = i;
+            while (j < text.size() && (text[j] == L' ' || text[j] == L'\t')) ++j;
+
+            wchar_t prev = out.empty() ? 0 : out.back();
+            wchar_t next = (j < text.size()) ? text[j] : 0;
+
+            bool skip = false;
+            if ((IsCjkChar(prev) || IsCjkPunctuation(prev)) && (IsCjkChar(next) || IsCjkPunctuation(next))) {
+                skip = true;
+            }
+
+            if (!skip) {
+                if (!out.empty() && out.back() != L' ' && out.back() != L'\n') out.push_back(L' ');
+            }
+
+            i = j - 1;
+            continue;
+        }
+
+        out.push_back(ch);
+    }
+
+    while (!out.empty() && (out.back() == L' ' || out.back() == L'\n' || out.back() == L'\t')) out.pop_back();
+    return out;
+}
+
 bool ReadUtf8TextFile(const wstring& path, wstring& outText) {
     outText.clear();
     FILE* f = _wfopen(path.c_str(), L"rb");
@@ -1033,19 +1099,23 @@ void DoCaptureOcr(HWND hWnd) {
         return;
     }
 
+    ocrText = NormalizeOcrTextForChinese(ocrText);
+
     if (ocrText.empty()) {
         MessageBox(hWnd, L"识别完成：未检测到可读文字。", L"SnapCapture OCR", MB_OK | MB_ICONINFORMATION);
         return;
     }
 
+    g_ocrPanelVisible = false;
+    g_ocrPanelText.clear();
+    HideOcrEditControl();
+
     bool copied = CopyTextToClipboard(ocrText);
-    ShowOcrTextInOverlay(hWnd, ocrText);
-    InvalidateRect(hWnd, NULL, FALSE);
 
     if (copied) {
-        ShowTrayNotification(L"SnapCapture OCR", L"OCR 完成：已复制，可在选区内文本框直接选择内容。", NIIF_INFO);
+        ShowTrayNotification(L"SnapCapture OCR", L"OCR 完成：已复制识别文字（已优化中文空格）。", NIIF_INFO);
     } else {
-        ShowTrayNotification(L"SnapCapture OCR", L"OCR 完成：可在选区内文本框直接选择内容（剪贴板复制失败）。", NIIF_WARNING);
+        MessageBox(hWnd, ocrText.c_str(), L"SnapCapture OCR（复制失败，以下为识别结果）", MB_OK | MB_ICONWARNING);
     }
 }
 
