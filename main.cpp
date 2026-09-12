@@ -412,6 +412,9 @@ struct OverlayState {
 };
 
 OverlayState g_overlay;
+HWND g_hWndOcrEdit = NULL;
+bool g_ocrPanelVisible = false;
+wstring g_ocrPanelText = L"";
 
 // ========== 函数前置声明 ==========
 void LoadConfig();
@@ -440,6 +443,10 @@ void DoCaptureConfirm(HWND hWnd);
 void DoCaptureSaveAs(HWND hWnd);
 bool CopyTextToClipboard(const wstring& text);
 bool RunWinRTOcrWithPowerShell(const wstring& imagePath, wstring& outText, wstring& outError);
+void EnsureOcrEditControl(HWND hWnd);
+void HideOcrEditControl();
+void UpdateOcrEditLayout(HWND hWnd);
+void ShowOcrTextInOverlay(HWND hWnd, const wstring& text);
 void DoCaptureOcr(HWND hWnd);
 
 // ========== 兼容性 wstring 转换函数 ==========
@@ -665,6 +672,9 @@ void ResetOverlaySessionState() {
     g_shapes.clear();
     g_redoStack.clear();
     g_annotationMode = ANNOTATION_NONE;
+    g_ocrPanelVisible = false;
+    g_ocrPanelText.clear();
+    HideOcrEditControl();
 }
 
 // ========== 撤销 / 重做 ==========
@@ -839,8 +849,16 @@ bool RunWinRTOcrWithPowerShell(const wstring& imagePath, wstring& outText, wstri
         L"$decoder=AwaitWinRtOp $decoderOp ([Windows.Graphics.Imaging.BitmapDecoder,Windows.Graphics.Imaging,ContentType=WindowsRuntime]) $asTaskGeneric;"
         L"$bmpOp=$decoder.GetSoftwareBitmapAsync();"
         L"$bmp=AwaitWinRtOp $bmpOp ([Windows.Graphics.Imaging.SoftwareBitmap,Windows.Graphics.Imaging,ContentType=WindowsRuntime]) $asTaskGeneric;"
-        L"$engine=[Windows.Media.Ocr.OcrEngine,Windows.Foundation,ContentType=WindowsRuntime]::TryCreateFromUserProfileLanguages();"
-        L"if($null -eq $engine){ throw 'Windows.Media.Ocr.OcrEngine unavailable'; }"
+        L"$engine=$null;"
+        L"$langZh=[Windows.Globalization.Language,Windows.Foundation,ContentType=WindowsRuntime]::new('zh-Hans');"
+        L"if([Windows.Media.Ocr.OcrEngine,Windows.Foundation,ContentType=WindowsRuntime]::IsLanguageSupported($langZh)){"
+        L"$engine=[Windows.Media.Ocr.OcrEngine,Windows.Foundation,ContentType=WindowsRuntime]::TryCreateFromLanguage($langZh);}"
+        L"if($null -eq $engine){"
+        L"$langZhCn=[Windows.Globalization.Language,Windows.Foundation,ContentType=WindowsRuntime]::new('zh-CN');"
+        L"if([Windows.Media.Ocr.OcrEngine,Windows.Foundation,ContentType=WindowsRuntime]::IsLanguageSupported($langZhCn)){"
+        L"$engine=[Windows.Media.Ocr.OcrEngine,Windows.Foundation,ContentType=WindowsRuntime]::TryCreateFromLanguage($langZhCn);}}"
+        L"if($null -eq $engine){$engine=[Windows.Media.Ocr.OcrEngine,Windows.Foundation,ContentType=WindowsRuntime]::TryCreateFromUserProfileLanguages();}"
+        L"if($null -eq $engine){ throw 'Windows.Media.Ocr.OcrEngine unavailable (Chinese language pack may be missing)'; }"
         L"$resOp=$engine.RecognizeAsync($bmp);"
         L"$res=AwaitWinRtOp $resOp ([Windows.Media.Ocr.OcrResult,Windows.Foundation,ContentType=WindowsRuntime]) $asTaskGeneric;"
         L"[System.IO.File]::WriteAllText($out, $res.Text, [System.Text.UTF8Encoding]::new($false));"
@@ -907,6 +925,80 @@ bool RunWinRTOcrWithPowerShell(const wstring& imagePath, wstring& outText, wstri
     return true;
 }
 
+void EnsureOcrEditControl(HWND hWnd) {
+    if (g_hWndOcrEdit && IsWindow(g_hWndOcrEdit)) return;
+
+    g_hWndOcrEdit = CreateWindowEx(
+        WS_EX_CLIENTEDGE,
+        L"EDIT",
+        L"",
+        WS_CHILD | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL | ES_READONLY | ES_NOHIDESEL,
+        0, 0, 0, 0,
+        hWnd,
+        NULL,
+        g_hInstance,
+        NULL
+    );
+
+    if (g_hWndOcrEdit) {
+        SendMessage(g_hWndOcrEdit, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), TRUE);
+        SendMessage(g_hWndOcrEdit, EM_SETSEL, 0, 0);
+    }
+}
+
+void HideOcrEditControl() {
+    if (g_hWndOcrEdit && IsWindow(g_hWndOcrEdit)) {
+        ShowWindow(g_hWndOcrEdit, SW_HIDE);
+        SetWindowText(g_hWndOcrEdit, L"");
+    }
+}
+
+void UpdateOcrEditLayout(HWND hWnd) {
+    if (!g_ocrPanelVisible || !g_hWndOcrEdit || !IsWindow(g_hWndOcrEdit) || !g_overlay.selectionDone) return;
+
+    RECT sel = g_overlay.selection;
+    int sw = g_screenWidth;
+    int sh = g_screenHeight;
+
+    int margin = 10;
+    int x = sel.left + margin;
+    int w = (sel.right - sel.left) - margin * 2;
+    if (w < 220) w = 220;
+
+    int y = 0;
+    int h = 0;
+    int selH = sel.bottom - sel.top;
+
+    if (selH >= 180) {
+        h = min(200, max(100, selH / 2));
+        y = sel.bottom - h - margin;
+    } else {
+        h = 120;
+        y = sel.bottom + 8;
+    }
+
+    if (x + w > sw - 8) x = max(8, sw - w - 8);
+    if (x < 8) x = 8;
+    if (y + h > sh - 8) y = max(8, sh - h - 8);
+    if (y < 8) y = 8;
+
+    MoveWindow(g_hWndOcrEdit, x, y, w, h, TRUE);
+}
+
+void ShowOcrTextInOverlay(HWND hWnd, const wstring& text) {
+    EnsureOcrEditControl(hWnd);
+    if (!g_hWndOcrEdit || !IsWindow(g_hWndOcrEdit)) return;
+
+    g_ocrPanelVisible = true;
+    g_ocrPanelText = text;
+
+    SetWindowText(g_hWndOcrEdit, text.c_str());
+    UpdateOcrEditLayout(hWnd);
+    ShowWindow(g_hWndOcrEdit, SW_SHOW);
+    SetFocus(g_hWndOcrEdit);
+    SendMessage(g_hWndOcrEdit, EM_SETSEL, 0, 0);
+}
+
 void DoCaptureOcr(HWND hWnd) {
     CommitEditingText();
     g_selectedTextIndex = -1;
@@ -936,7 +1028,7 @@ void DoCaptureOcr(HWND hWnd) {
 
     if (!ok) {
         wstring msg = L"OCR 识别失败。\n\n";
-        msg += ocrError.empty() ? L"请确认系统 OCR 组件可用。" : ocrError;
+        msg += ocrError.empty() ? L"请确认系统 OCR 组件可用（建议安装中文语言包）。" : ocrError;
         MessageBox(hWnd, msg.c_str(), L"SnapCapture OCR", MB_OK | MB_ICONWARNING);
         return;
     }
@@ -947,19 +1039,13 @@ void DoCaptureOcr(HWND hWnd) {
     }
 
     bool copied = CopyTextToClipboard(ocrText);
-
-    wstring preview = ocrText;
-    if (preview.length() > 180) {
-        preview = preview.substr(0, 180) + L"...";
-    }
+    ShowOcrTextInOverlay(hWnd, ocrText);
+    InvalidateRect(hWnd, NULL, FALSE);
 
     if (copied) {
-        ShowTrayNotification(L"SnapCapture OCR", L"OCR 识别成功：文字已复制到剪贴板。", NIIF_INFO);
-        wstring tip = L"OCR 已完成，文本已复制到剪贴板。\n\n预览：\n" + preview;
-        MessageBox(hWnd, tip.c_str(), L"SnapCapture OCR", MB_OK | MB_ICONINFORMATION);
+        ShowTrayNotification(L"SnapCapture OCR", L"OCR 完成：已复制，可在选区内文本框直接选择内容。", NIIF_INFO);
     } else {
-        wstring tip = L"OCR 完成，但复制到剪贴板失败。\n\n识别结果：\n" + preview;
-        MessageBox(hWnd, tip.c_str(), L"SnapCapture OCR", MB_OK | MB_ICONWARNING);
+        ShowTrayNotification(L"SnapCapture OCR", L"OCR 完成：可在选区内文本框直接选择内容（剪贴板复制失败）。", NIIF_WARNING);
     }
 }
 
@@ -2586,6 +2672,12 @@ void DrawOverlay(HWND hWnd, HDC hdc) {
         }
     }
     
+    if (g_ocrPanelVisible) {
+        UpdateOcrEditLayout(hWnd);
+    } else {
+        HideOcrEditControl();
+    }
+
     // 8. 一次性将完整的双缓冲结果贴图到屏幕 DC (Buttery Smooth!)
     BitBlt(hdc, 0, 0, w, h, hMemDC, 0, 0, SRCCOPY);
 }
@@ -3944,6 +4036,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
             KillTimer(hWnd, 1);
             DestroyWindow(hWnd);
             g_hWndOverlay = NULL;
+            g_hWndOcrEdit = NULL;
             
             // 释放超高性能渲染双缓冲与源缓存 DCs 和 Bitmaps
             if (g_hOverlayDoubleBufferDC) {
