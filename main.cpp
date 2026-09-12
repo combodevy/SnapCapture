@@ -998,7 +998,7 @@ void EnsureOcrEditControl(HWND hWnd) {
         0,
         L"EDIT",
         L"",
-        WS_CHILD | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL | ES_READONLY | ES_NOHIDESEL,
+        WS_CHILD | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL | ES_READONLY | ES_NOHIDESEL | ES_WANTRETURN,
         0, 0, 0, 0,
         hWnd,
         NULL,
@@ -1023,7 +1023,7 @@ void UpdateOcrEditLayout(HWND hWnd) {
     if (!g_ocrPanelVisible || !g_hWndOcrEdit || !IsWindow(g_hWndOcrEdit) || !g_overlay.selectionDone) return;
 
     RECT sel = g_overlay.selection;
-    int inset = 2;
+    int inset = 4;
     int x = sel.left + inset;
     int y = sel.top + inset;
     int w = (sel.right - sel.left) - inset * 2;
@@ -1040,6 +1040,7 @@ void UpdateOcrEditLayout(HWND hWnd) {
     }
 
     MoveWindow(g_hWndOcrEdit, x, y, w, h, TRUE);
+    SetWindowPos(g_hWndOcrEdit, HWND_TOP, x, y, w, h, SWP_SHOWWINDOW);
 }
 
 void ShowOcrTextInOverlay(HWND hWnd, const wstring& text) {
@@ -1097,16 +1098,14 @@ void DoCaptureOcr(HWND hWnd) {
         return;
     }
 
-    g_ocrPanelVisible = false;
-    g_ocrPanelText.clear();
-    HideOcrEditControl();
-
     bool copied = CopyTextToClipboard(ocrText);
+    ShowOcrTextInOverlay(hWnd, ocrText);
+    InvalidateRect(hWnd, NULL, FALSE);
 
     if (copied) {
-        ShowTrayNotification(L"SnapCapture OCR", L"OCR 完成：文字已复制到剪贴板。", NIIF_INFO);
+        ShowTrayNotification(L"SnapCapture OCR", L"OCR 完成：可在截图框内直接拖选文字，且已复制到剪贴板。", NIIF_INFO);
     } else {
-        MessageBox(hWnd, ocrText.c_str(), L"SnapCapture OCR（复制失败，以下为识别结果）", MB_OK | MB_ICONWARNING);
+        ShowTrayNotification(L"SnapCapture OCR", L"OCR 完成：可在截图框内拖选文字（自动复制失败）。", NIIF_WARNING);
     }
 }
 
@@ -2841,6 +2840,16 @@ BOOL GetWindowRectAtPoint(POINT pt, RECT* pRect) {
 // ========== 全屏 Overlay 覆盖画布窗口过程 WndProc ==========
 LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
+        case WM_CTLCOLOREDIT:
+        case WM_CTLCOLORSTATIC: {
+            if ((HWND)lParam == g_hWndOcrEdit) {
+                HDC hdc = (HDC)wParam;
+                SetTextColor(hdc, RGB(255, 255, 255));
+                SetBkMode(hdc, TRANSPARENT);
+                return (LRESULT)GetStockObject(HOLLOW_BRUSH);
+            }
+            break;
+        }
         case WM_PAINT: {
             PAINTSTRUCT ps;
             HDC hdc = BeginPaint(hWnd, &ps);
