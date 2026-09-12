@@ -449,6 +449,7 @@ wstring NormalizeOcrTextForChinese(const wstring& text);
 void EnsureOcrEditControl(HWND hWnd);
 void HideOcrEditControl();
 bool IsPointInOcrEditClient(HWND hWnd, POINT pt);
+bool CopyCurrentOcrSelection();
 void UpdateOcrEditLayout(HWND hWnd);
 void ShowOcrTextInOverlay(HWND hWnd, const wstring& text);
 void DoCaptureOcr(HWND hWnd);
@@ -1032,6 +1033,29 @@ bool IsPointInOcrEditClient(HWND hWnd, POINT pt) {
     return PtInRect(&c, pt) != 0;
 }
 
+bool CopyCurrentOcrSelection() {
+    if (!g_hWndOcrEdit || !IsWindow(g_hWndOcrEdit)) return false;
+
+    int len = GetWindowTextLengthW(g_hWndOcrEdit);
+    if (len <= 0) return false;
+
+    vector<wchar_t> buffer((size_t)len + 1);
+    GetWindowTextW(g_hWndOcrEdit, buffer.data(), len + 1);
+
+    DWORD start = 0;
+    DWORD end = 0;
+    SendMessage(g_hWndOcrEdit, EM_GETSEL, (WPARAM)&start, (LPARAM)&end);
+
+    wstring text;
+    if (end > start && end <= (DWORD)len) {
+        text.assign(buffer.data() + start, buffer.data() + end);
+    } else {
+        text.assign(buffer.data());
+    }
+
+    return CopyTextToClipboard(text);
+}
+
 void UpdateOcrEditLayout(HWND hWnd) {
     if (!g_ocrPanelVisible || !g_hWndOcrEdit || !IsWindow(g_hWndOcrEdit) || !g_overlay.selectionDone) return;
 
@@ -1067,7 +1091,7 @@ void ShowOcrTextInOverlay(HWND hWnd, const wstring& text) {
     UpdateOcrEditLayout(hWnd);
     ShowWindow(g_hWndOcrEdit, SW_SHOW);
     SetFocus(g_hWndOcrEdit);
-    SendMessage(g_hWndOcrEdit, EM_SETSEL, 0, -1);
+    SendMessage(g_hWndOcrEdit, EM_SETSEL, 0, 0);
 }
 
 void DoCaptureOcr(HWND hWnd) {
@@ -1111,15 +1135,10 @@ void DoCaptureOcr(HWND hWnd) {
         return;
     }
 
-    bool copied = CopyTextToClipboard(ocrText);
     ShowOcrTextInOverlay(hWnd, ocrText);
     InvalidateRect(hWnd, NULL, FALSE);
 
-    if (copied) {
-        ShowTrayNotification(L"SnapCapture OCR", L"OCR 完成：可在截图框内直接拖选文字，且已复制到剪贴板。", NIIF_INFO);
-    } else {
-        ShowTrayNotification(L"SnapCapture OCR", L"OCR 完成：可在截图框内拖选文字（自动复制失败）。", NIIF_WARNING);
-    }
+    ShowTrayNotification(L"SnapCapture OCR", L"OCR 完成：请在截图框内拖选文字后按 Ctrl+C 复制。", NIIF_INFO);
 }
 
 // ========== DPI 感知初始化 ==========
@@ -3972,8 +3991,8 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
                     break;
                 }
                 if (ctrl && wParam == 'C') {
-                    SendMessage(g_hWndOcrEdit, WM_COPY, 0, 0);
-                    ShowTrayNotification(L"SnapCapture OCR", L"已复制当前选中文字。", NIIF_INFO);
+                    bool copied = CopyCurrentOcrSelection();
+                    ShowTrayNotification(L"SnapCapture OCR", copied ? L"已复制选中文字。" : L"复制失败。", copied ? NIIF_INFO : NIIF_WARNING);
                     break;
                 }
                 if (wParam == VK_ESCAPE) {
