@@ -438,6 +438,9 @@ void UndoShape();
 void RedoShape();
 void DoCaptureConfirm(HWND hWnd);
 void DoCaptureSaveAs(HWND hWnd);
+bool CopyTextToClipboard(const wstring& text);
+bool RunWinRTOcrWithPowerShell(const wstring& imagePath, wstring& outText, wstring& outError);
+void DoCaptureOcr(HWND hWnd);
 
 // ========== 兼容性 wstring 转换函数 ==========
 wstring ToWString(int val) {
@@ -705,6 +708,207 @@ void DoCaptureSaveAs(HWND hWnd) {
         DeleteObject(hBmp);
     }
     SendMessage(hWnd, WM_CLOSE, 0, 0);
+}
+
+bool CopyTextToClipboard(const wstring& text) {
+    if (text.empty()) return false;
+    if (!OpenClipboard(g_hWndMain)) return false;
+
+    EmptyClipboard();
+    SIZE_T bytes = (text.size() + 1) * sizeof(wchar_t);
+    HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, bytes);
+    if (!hMem) {
+        CloseClipboard();
+        return false;
+    }
+
+    void* p = GlobalLock(hMem);
+    if (!p) {
+        GlobalFree(hMem);
+        CloseClipboard();
+        return false;
+    }
+
+    memcpy(p, text.c_str(), bytes);
+    GlobalUnlock(hMem);
+
+    if (!SetClipboardData(CF_UNICODETEXT, hMem)) {
+        GlobalFree(hMem);
+        CloseClipboard();
+        return false;
+    }
+
+    CloseClipboard();
+    return true;
+}
+
+wstring EscapeSingleQuotesForPowerShell(const wstring& s) {
+    wstring out;
+    out.reserve(s.size() + 8);
+    for (wchar_t c : s) {
+        if (c == L'\'') out += L"''";
+        else out.push_back(c);
+    }
+    return out;
+}
+
+wstring EscapeDoubleQuotesForCmd(const wstring& s) {
+    wstring out;
+    out.reserve(s.size() + 16);
+    for (wchar_t c : s) {
+        if (c == L'"') out += L"\\\"";
+        else out.push_back(c);
+    }
+    return out;
+}
+
+bool RunWinRTOcrWithPowerShell(const wstring& imagePath, wstring& outText, wstring& outError) {
+    outText.clear();
+    outError.clear();
+
+    SECURITY_ATTRIBUTES sa = {};
+    sa.nLength = sizeof(sa);
+    sa.lpSecurityDescriptor = NULL;
+    sa.bInheritHandle = TRUE;
+
+    HANDLE hRead = NULL;
+    HANDLE hWrite = NULL;
+    if (!CreatePipe(&hRead, &hWrite, &sa, 0)) {
+        outError = L"创建输出管道失败";
+        return false;
+    }
+    SetHandleInformation(hRead, HANDLE_FLAG_INHERIT, 0);
+
+    wstring escapedPath = EscapeSingleQuotesForPowerShell(imagePath);
+    wstring script =
+        L"$ErrorActionPreference='Stop';"
+        L"Add-Type -AssemblyName System.Runtime.WindowsRuntime;"
+        L"$path='" + escapedPath + L"';"
+        L"$file=[System.WindowsRuntimeSystemExtensions]::AsTask([Windows.Storage.StorageFile,Windows.Storage,ContentType=WindowsRuntime]::GetFileFromPathAsync($path)).Result;"
+        L"$stream=[System.WindowsRuntimeSystemExtensions]::AsTask($file.OpenAsync([Windows.Storage.FileAccessMode]::Read)).Result;"
+        L"$decoder=[System.WindowsRuntimeSystemExtensions]::AsTask([Windows.Graphics.Imaging.BitmapDecoder,Windows.Graphics.Imaging,ContentType=WindowsRuntime]::CreateAsync($stream)).Result;"
+        L"$bmp=[System.WindowsRuntimeSystemExtensions]::AsTask($decoder.GetSoftwareBitmapAsync()).Result;"
+        L"$engine=[Windows.Media.Ocr.OcrEngine,Windows.Foundation,ContentType=WindowsRuntime]::TryCreateFromUserProfileLanguages();"
+        L"if($null -eq $engine){throw 'OcrEngine unavailable';}"
+        L"$res=[System.WindowsRuntimeSystemExtensions]::AsTask($engine.RecognizeAsync($bmp)).Result;"
+        L"[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;"
+        L"Write-Output $res.Text;";
+
+    wstring commandLine = L"powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"" + EscapeDoubleQuotesForCmd(script) + L"\"";
+
+    STARTUPINFOW si = {};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESHOWWINDOW | STARTF_USESTDHANDLES;
+    si.wShowWindow = SW_HIDE;
+    si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    si.hStdOutput = hWrite;
+    si.hStdError = hWrite;
+
+    PROCESS_INFORMATION pi = {};
+    vector<wchar_t> cmdBuf(commandLine.begin(), commandLine.end());
+    cmdBuf.push_back(L'\0');
+
+    BOOL created = CreateProcessW(
+        NULL,
+        cmdBuf.data(),
+        NULL,
+        NULL,
+        TRUE,
+        CREATE_NO_WINDOW,
+        NULL,
+        NULL,
+        &si,
+        &pi
+    );
+
+    CloseHandle(hWrite);
+
+    if (!created) {
+        CloseHandle(hRead);
+        outError = L"启动 PowerShell OCR 子进程失败";
+        return false;
+    }
+
+    string raw;
+    const DWORD chunkSize = 4096;
+    char chunk[chunkSize];
+    DWORD bytesRead = 0;
+    while (ReadFile(hRead, chunk, chunkSize, &bytesRead, NULL) && bytesRead > 0) {
+        raw.append(chunk, chunk + bytesRead);
+    }
+
+    WaitForSingleObject(pi.hProcess, 60000);
+
+    DWORD exitCode = 0;
+    GetExitCodeProcess(pi.hProcess, &exitCode);
+
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    CloseHandle(hRead);
+
+    if (!raw.empty()) {
+        int wlen = MultiByteToWideChar(CP_UTF8, 0, raw.c_str(), (int)raw.size(), NULL, 0);
+        if (wlen > 0) {
+            outText.resize((size_t)wlen);
+            MultiByteToWideChar(CP_UTF8, 0, raw.c_str(), (int)raw.size(), &outText[0], wlen);
+        }
+    }
+
+    while (!outText.empty() && (outText.back() == L'\r' || outText.back() == L'\n' || outText.back() == L' ' || outText.back() == L'\t')) {
+        outText.pop_back();
+    }
+
+    if (exitCode != 0) {
+        outError = outText.empty() ? L"OCR 识别失败" : outText;
+        outText.clear();
+        return false;
+    }
+
+    return true;
+}
+
+void DoCaptureOcr(HWND hWnd) {
+    CommitEditingText();
+    g_selectedTextIndex = -1;
+
+    HBITMAP hBmp = CropScreenCapture(g_overlay.selection);
+    if (!hBmp) {
+        ShowTrayNotification(L"SnapCapture OCR", L"OCR 失败：选区无效。", NIIF_WARNING);
+        return;
+    }
+
+    wchar_t tempDir[MAX_PATH] = { 0 };
+    GetTempPathW(MAX_PATH, tempDir);
+    wstring tempFile = JoinPath(tempDir, BuildTimestampedScreenshotName());
+
+    bool saved = SaveBitmapToFile(hBmp, tempFile);
+    DeleteObject(hBmp);
+
+    if (!saved) {
+        ShowTrayNotification(L"SnapCapture OCR", L"OCR 失败：临时图像保存失败。", NIIF_WARNING);
+        return;
+    }
+
+    wstring ocrText;
+    wstring ocrError;
+    bool ok = RunWinRTOcrWithPowerShell(tempFile, ocrText, ocrError);
+    DeleteFileW(tempFile.c_str());
+
+    if (!ok) {
+        ShowTrayNotification(L"SnapCapture OCR", L"OCR 识别失败，请确认系统组件可用。", NIIF_WARNING);
+        return;
+    }
+
+    if (ocrText.empty()) {
+        ShowTrayNotification(L"SnapCapture OCR", L"识别完成：未检测到可读文字。", NIIF_INFO);
+        return;
+    }
+
+    if (CopyTextToClipboard(ocrText)) {
+        ShowTrayNotification(L"SnapCapture OCR", L"OCR 文字已复制到剪贴板。", NIIF_INFO);
+    } else {
+        ShowTrayNotification(L"SnapCapture OCR", L"OCR 完成，但复制到剪贴板失败。", NIIF_WARNING);
+    }
 }
 
 // ========== DPI 感知初始化 ==========
@@ -1186,8 +1390,8 @@ vector<ToolbarButton> GetToolbarButtons(const RECT& sel, int width, int height) 
     int spacing = 8;
     int sep_w = 16; // 分割线空间宽度
     
-    // 9个按钮，2个分割线区域，加上左右 padding
-    int total_w = btn_w * 9 + spacing * 6 + sep_w * 2 + 20;
+    // 10个按钮，2个分割线区域，加上左右 padding
+    int total_w = btn_w * 10 + spacing * 7 + sep_w * 2 + 20;
     int total_h = btn_h + 12;
     if (g_annotationMode != ANNOTATION_NONE) {
         total_h += 44; // 预留属性子工具栏的空间 (增大到 44px)
@@ -1221,13 +1425,14 @@ vector<ToolbarButton> GetToolbarButtons(const RECT& sel, int width, int height) 
     int x3 = x2 + btn_w + spacing;
     int x4 = x3 + btn_w + spacing;
     
-    // 组 2: 撤销 (1个，在分割线 1 之后)
+    // 组 2: 撤销, OCR (2个，在分割线 1 之后)
     int x5 = x4 + btn_w + sep_w;
+    int x6 = x5 + btn_w + spacing;
     
     // 组 3: 保存, 取消, 确定 (3个，在分割线 2 之后)
-    int x6 = x5 + btn_w + sep_w;
-    int x7 = x6 + btn_w + spacing;
+    int x7 = x6 + btn_w + sep_w;
     int x8 = x7 + btn_w + spacing;
+    int x9 = x8 + btn_w + spacing;
     
     // 1. 矩形
     ToolbarButton bRect;
@@ -1271,23 +1476,30 @@ vector<ToolbarButton> GetToolbarButtons(const RECT& sel, int width, int height) 
     bUndo.color = Color(255, 200, 200, 200);
     btns.push_back(bUndo);
     
-    // 7. 保存
+    // 7. OCR
+    ToolbarButton bOcr;
+    bOcr.rect = { x6, start_y, x6 + btn_w, start_y + btn_h };
+    bOcr.text = L"ocr";
+    bOcr.color = Color(255, 200, 200, 200);
+    btns.push_back(bOcr);
+
+    // 8. 保存
     ToolbarButton bSave;
-    bSave.rect = { x6, start_y, x6 + btn_w, start_y + btn_h };
+    bSave.rect = { x7, start_y, x7 + btn_w, start_y + btn_h };
     bSave.text = L"save";
     bSave.color = Color(255, 200, 200, 200);
     btns.push_back(bSave);
     
-    // 8. 取消 (红色)
+    // 9. 取消 (红色)
     ToolbarButton bCancel;
-    bCancel.rect = { x7, start_y, x7 + btn_w, start_y + btn_h };
+    bCancel.rect = { x8, start_y, x8 + btn_w, start_y + btn_h };
     bCancel.text = L"cancel";
     bCancel.color = Color(255, 240, 92, 92); // 软红色
     btns.push_back(bCancel);
     
-    // 9. 确定 (绿色)
+    // 10. 确定 (绿色)
     ToolbarButton bConfirm;
-    bConfirm.rect = { x8, start_y, x8 + btn_w, start_y + btn_h };
+    bConfirm.rect = { x9, start_y, x9 + btn_w, start_y + btn_h };
     bConfirm.text = L"confirm";
     bConfirm.color = Color(255, 46, 204, 113); // 软绿色
     btns.push_back(bConfirm);
@@ -1969,8 +2181,8 @@ void DrawOverlay(HWND hWnd, HDC hdc) {
                 if (isActive) {
                     iconColor = Color(255, 0, 174, 255); // 激活图标变成品牌蓝色
                 } else if (isHovered) {
-                    if (i == 7) iconColor = Color(255, 255, 70, 70); // 悬停红更亮
-                    else if (i == 8) iconColor = Color(255, 70, 230, 130); // 悬停绿更亮
+                    if (i == 8) iconColor = Color(255, 255, 70, 70); // 悬停红更亮
+                    else if (i == 9) iconColor = Color(255, 70, 230, 130); // 悬停绿更亮
                     else iconColor = Color(255, 255, 255, 255); // 普通白亮
                 }
                 
@@ -2029,7 +2241,15 @@ void DrawOverlay(HWND hWnd, HDC hdc) {
                         g.DrawLine(&undoPen, cx, cy - 7.0f, cx + 3.0f, cy - 4.0f);
                         break;
                     }
-                    case 6: { // 保存 (软盘的线条标志)
+                    case 6: { // OCR（文档+放大镜）
+                        g.DrawRectangle(&iconPen, cx - 9.0f, cy - 8.0f, 10.0f, 14.0f);
+                        g.DrawLine(&iconPen, cx - 6.5f, cy - 3.0f, cx - 1.0f, cy - 3.0f);
+                        g.DrawLine(&iconPen, cx - 6.5f, cy + 1.0f, cx - 1.0f, cy + 1.0f);
+                        g.DrawEllipse(&iconPen, cx + 3.0f, cy + 1.0f, 8.0f, 8.0f);
+                        g.DrawLine(&iconPen, cx + 9.5f, cy + 7.5f, cx + 12.5f, cy + 10.5f);
+                        break;
+                    }
+                    case 7: { // 保存 (软盘的线条标志)
                         GraphicsPath path;
                         path.AddLine(cx - 8.0f, cy - 8.0f, cx + 4.0f, cy - 8.0f);
                         path.AddLine(cx + 4.0f, cy - 8.0f, cx + 8.0f, cy - 4.0f);
@@ -2041,12 +2261,12 @@ void DrawOverlay(HWND hWnd, HDC hdc) {
                         g.DrawRectangle(&iconPen, cx - 5.0f, cy + 1.0f, 10.0f, 7.0f);
                         break;
                     }
-                    case 7: { // 取消
+                    case 8: { // 取消
                         g.DrawLine(&iconPen, cx - 7.0f, cy - 7.0f, cx + 7.0f, cy + 7.0f);
                         g.DrawLine(&iconPen, cx + 7.0f, cy - 7.0f, cx - 7.0f, cy + 7.0f);
                         break;
                     }
-                    case 8: { // 确定
+                    case 9: { // 确定
                         g.DrawLine(&iconPen, cx - 7.0f, cy + 1.0f, cx - 2.0f, cy + 6.0f);
                         g.DrawLine(&iconPen, cx - 2.0f, cy + 6.0f, cx + 7.0f, cy - 4.0f);
                         break;
@@ -2055,7 +2275,7 @@ void DrawOverlay(HWND hWnd, HDC hdc) {
             }
             
             // 绘制分割线
-            if (buttons.size() >= 7) {
+            if (buttons.size() >= 8) {
                 Pen sepPen(Color(255, 55, 55, 55), 1.0f);
                 
                 // 分割线 1
@@ -2063,7 +2283,7 @@ void DrawOverlay(HWND hWnd, HDC hdc) {
                 g.DrawLine(&sepPen, (REAL)sep1_x, (REAL)(min_y + 8), (REAL)sep1_x, (REAL)(max_y - 8));
                 
                 // 分割线 2
-                int sep2_x = (buttons[5].rect.right + buttons[6].rect.left) / 2;
+                int sep2_x = (buttons[6].rect.right + buttons[7].rect.left) / 2;
                 g.DrawLine(&sepPen, (REAL)sep2_x, (REAL)(min_y + 8), (REAL)sep2_x, (REAL)(max_y - 8));
             }
             
@@ -3115,13 +3335,17 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
                         }
                         InvalidateRect(hWnd, NULL, FALSE);
                     }
-                    else if (btn == 7) { // 保存
+                    else if (btn == 7) { // OCR
+                        DoCaptureOcr(hWnd);
+                        InvalidateRect(hWnd, NULL, FALSE);
+                    }
+                    else if (btn == 8) { // 保存
                         DoCaptureSaveAs(hWnd);
                     }
-                    else if (btn == 8) { // 取消
+                    else if (btn == 9) { // 取消
                         SendMessage(hWnd, WM_CLOSE, 0, 0);
                     }
-                    else if (btn == 9) { // 确定
+                    else if (btn == 10) { // 确定
                         DoCaptureConfirm(hWnd);
                     }
                     break; // 拦截消息，不往下处理
@@ -3518,6 +3742,11 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
                 }
                 if (ctrl && wParam == 'S' && g_overlay.selectionDone) {
                     DoCaptureSaveAs(hWnd);
+                    break;
+                }
+                if (ctrl && shift && wParam == 'O' && g_overlay.selectionDone) {
+                    DoCaptureOcr(hWnd);
+                    InvalidateRect(hWnd, NULL, FALSE);
                     break;
                 }
                 if (ctrl && wParam == 'C' && g_overlay.selectionDone) {
