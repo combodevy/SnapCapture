@@ -1097,14 +1097,16 @@ void DoCaptureOcr(HWND hWnd) {
         return;
     }
 
+    g_ocrPanelVisible = false;
+    g_ocrPanelText.clear();
+    HideOcrEditControl();
+
     bool copied = CopyTextToClipboard(ocrText);
-    ShowOcrTextInOverlay(hWnd, ocrText);
-    InvalidateRect(hWnd, NULL, FALSE);
 
     if (copied) {
-        ShowTrayNotification(L"SnapCapture OCR", L"OCR 完成：结果可在截图框内直接选中复制。", NIIF_INFO);
+        ShowTrayNotification(L"SnapCapture OCR", L"OCR 完成：文字已复制到剪贴板。", NIIF_INFO);
     } else {
-        ShowTrayNotification(L"SnapCapture OCR", L"OCR 完成：可在截图框内选中复制（剪贴板自动复制失败）。", NIIF_WARNING);
+        MessageBox(hWnd, ocrText.c_str(), L"SnapCapture OCR（复制失败，以下为识别结果）", MB_OK | MB_ICONWARNING);
     }
 }
 
