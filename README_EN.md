@@ -131,7 +131,7 @@ The Release workflow can also be triggered manually from GitHub with an explicit
     *   `Ctrl + Y` or `Ctrl + Shift + Z`: redo
     *   `Esc`: exit without saving
 
-7.  **Settings**: right-click the tray icon and open Settings to change the global hotkey, clipboard copying, the auto-save directory, tray notifications, the default capture mode, and launch on boot.
+7.  **Settings**: right-click the tray icon and open Settings to change the global hotkey, clipboard copying, the auto-save directory, tray notifications, the default capture mode, and launch on boot. If the hotkey ever stops responding, use the "重新装载快捷键钩子" (reload hooks) entry in the same menu.
 
 ## Known Limitations
 
