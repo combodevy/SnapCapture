@@ -995,7 +995,7 @@ void EnsureOcrEditControl(HWND hWnd) {
     if (g_hWndOcrEdit && IsWindow(g_hWndOcrEdit)) return;
 
     g_hWndOcrEdit = CreateWindowEx(
-        WS_EX_CLIENTEDGE,
+        0,
         L"EDIT",
         L"",
         WS_CHILD | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL | ES_READONLY | ES_NOHIDESEL,
@@ -1023,30 +1023,21 @@ void UpdateOcrEditLayout(HWND hWnd) {
     if (!g_ocrPanelVisible || !g_hWndOcrEdit || !IsWindow(g_hWndOcrEdit) || !g_overlay.selectionDone) return;
 
     RECT sel = g_overlay.selection;
-    int sw = g_screenWidth;
-    int sh = g_screenHeight;
+    int inset = 2;
+    int x = sel.left + inset;
+    int y = sel.top + inset;
+    int w = (sel.right - sel.left) - inset * 2;
+    int h = (sel.bottom - sel.top) - inset * 2;
 
-    int margin = 10;
-    int x = sel.left + margin;
-    int w = (sel.right - sel.left) - margin * 2;
-    if (w < 220) w = 220;
-
-    int y = 0;
-    int h = 0;
-    int selH = sel.bottom - sel.top;
-
-    if (selH >= 180) {
-        h = min(200, max(100, selH / 2));
-        y = sel.bottom - h - margin;
-    } else {
+    if (w < 80 || h < 60) {
+        // 选区太小时放在下方，避免无法操作
+        x = sel.left;
+        y = sel.bottom + 6;
+        w = max(220, (int)(sel.right - sel.left));
         h = 120;
-        y = sel.bottom + 8;
+        if (x + w > g_screenWidth - 8) x = max(8, g_screenWidth - w - 8);
+        if (y + h > g_screenHeight - 8) y = max(8, g_screenHeight - h - 8);
     }
-
-    if (x + w > sw - 8) x = max(8, sw - w - 8);
-    if (x < 8) x = 8;
-    if (y + h > sh - 8) y = max(8, sh - h - 8);
-    if (y < 8) y = 8;
 
     MoveWindow(g_hWndOcrEdit, x, y, w, h, TRUE);
 }
@@ -1062,7 +1053,7 @@ void ShowOcrTextInOverlay(HWND hWnd, const wstring& text) {
     UpdateOcrEditLayout(hWnd);
     ShowWindow(g_hWndOcrEdit, SW_SHOW);
     SetFocus(g_hWndOcrEdit);
-    SendMessage(g_hWndOcrEdit, EM_SETSEL, 0, 0);
+    SendMessage(g_hWndOcrEdit, EM_SETSEL, 0, -1);
 }
 
 void DoCaptureOcr(HWND hWnd) {
@@ -1106,16 +1097,14 @@ void DoCaptureOcr(HWND hWnd) {
         return;
     }
 
-    g_ocrPanelVisible = false;
-    g_ocrPanelText.clear();
-    HideOcrEditControl();
-
     bool copied = CopyTextToClipboard(ocrText);
+    ShowOcrTextInOverlay(hWnd, ocrText);
+    InvalidateRect(hWnd, NULL, FALSE);
 
     if (copied) {
-        ShowTrayNotification(L"SnapCapture OCR", L"OCR 完成：已复制识别文字（已优化中文空格）。", NIIF_INFO);
+        ShowTrayNotification(L"SnapCapture OCR", L"OCR 完成：结果可在截图框内直接选中复制。", NIIF_INFO);
     } else {
-        MessageBox(hWnd, ocrText.c_str(), L"SnapCapture OCR（复制失败，以下为识别结果）", MB_OK | MB_ICONWARNING);
+        ShowTrayNotification(L"SnapCapture OCR", L"OCR 完成：可在截图框内选中复制（剪贴板自动复制失败）。", NIIF_WARNING);
     }
 }
 
