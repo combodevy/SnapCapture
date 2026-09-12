@@ -1000,7 +1000,7 @@ void EnsureOcrEditControl(HWND hWnd) {
         0,
         L"EDIT",
         L"",
-        WS_CHILD | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL | ES_READONLY | ES_NOHIDESEL | ES_WANTRETURN,
+        WS_CHILD | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL | ES_READONLY | ES_WANTRETURN,
         0, 0, 0, 0,
         hWnd,
         NULL,
@@ -3295,6 +3295,12 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
             if (IsPointInOcrEditClient(hWnd, pt)) {
                 SetFocus(g_hWndOcrEdit);
                 return DefWindowProc(hWnd, message, wParam, lParam);
+            }
+
+            if (g_ocrPanelVisible && g_hWndOcrEdit && IsWindow(g_hWndOcrEdit)) {
+                // 点击文本层外部时清空选区高亮，行为与常见截图工具一致
+                SendMessage(g_hWndOcrEdit, EM_SETSEL, (WPARAM)-1, 0);
+                SetFocus(hWnd);
             }
             
             if (!g_overlay.selectionDone) {
