@@ -48,6 +48,7 @@ using namespace std;
 #define ID_TRAY_SETTINGS 2002
 #define ID_TRAY_AUTOSTART 2003
 #define ID_TRAY_QUIT 2004
+#define ID_TRAY_RELOADHOOKS 2005
 
 // 选区控制点判定半径大小
 const int HANDLE_HALF_WIDTH = 6;
@@ -959,9 +960,47 @@ LRESULT CALLBACK KeyboardHookProc(int nCode, WPARAM wParam, LPARAM lParam) {
         KBDLLHOOKSTRUCT* kbd = (KBDLLHOOKSTRUCT*)lParam;
         if (g_isRecordingHotkey) {
             if (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN) {
-                SendMessage(g_hWndSettings, WM_HOTKEY_RECORDED, wParam, kbd->vkCode);
+                // 侧键被鼠标驱动映射成"浏览器后退/前进"时，仍按鼠标侧键录入
+                if (kbd->vkCode == VK_BROWSER_BACK) {
+                    SendMessage(g_hWndSettings, WM_HOTKEY_RECORDED, WM_XBUTTONDOWN, (LPARAM)1);
+                } else if (kbd->vkCode == VK_BROWSER_FORWARD) {
+                    SendMessage(g_hWndSettings, WM_HOTKEY_RECORDED, WM_XBUTTONDOWN, (LPARAM)2);
+                } else {
+                    SendMessage(g_hWndSettings, WM_HOTKEY_RECORDED, wParam, kbd->vkCode);
+                }
             }
             return 1; // Intercept all keyboard events during recording
+        }
+        // 部分鼠标驱动会把侧键映射成键盘的"浏览器后退/前进"而不是 XBUTTON 消息，
+        // 这里折算回 X1 / X2，保证驱动走哪条路径都能触发截图。
+        if (g_config.hotkey.type == L"mouse" && (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN)) {
+            int sideButton = 0;
+            if (kbd->vkCode == VK_BROWSER_BACK) sideButton = 1;
+            else if (kbd->vkCode == VK_BROWSER_FORWARD) sideButton = 2;
+
+            if (sideButton != 0) {
+                wstring button_name = (sideButton == 1) ? L"x1" : L"x2";
+                if (button_name == g_config.hotkey.mouse_button) {
+                    bool mods_match = true;
+                    vector<wstring> all_mods = { L"ctrl", L"shift", L"alt" };
+                    for (const auto& m : all_mods) {
+                        bool should_be = false;
+                        for (const auto& cm : g_config.hotkey.keys) {
+                            if (cm == m) { should_be = true; break; }
+                        }
+                        if (IsModifierPressed(m) != should_be) {
+                            mods_match = false;
+                            break;
+                        }
+                    }
+                    if (mods_match) {
+                        PostMessage(g_hWndMain, WM_TRIGGER_CAPTURE, 0, 0);
+                        if (g_config.hotkey.suppress) {
+                            return 1; // 吞噬事件
+                        }
+                    }
+                }
+            }
         }
         if (g_config.hotkey.type == L"keyboard") {
             wstring trigger_key = L"";
@@ -4111,6 +4150,15 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             TriggerCapture();
             break;
         }
+        case WM_TIMER: {
+            if (wParam == 2) {
+                // 钩子看门狗：非截图会话期间若钩子缺失则重新装载
+                if (!g_hWndOverlay && (!g_hMouseHook || !g_hKeyHook)) {
+                    StartHooks();
+                }
+            }
+            break;
+        }
         case WM_TRAY_MSG: {
             if (lParam == WM_RBUTTONUP) {
                 POINT pt;
@@ -4120,6 +4168,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                 AppendMenu(hMenu, MF_STRING, ID_TRAY_CAPTURE, L"开始截图");
                 AppendMenu(hMenu, MF_STRING, ID_TRAY_SETTINGS, L"设置中心");
                 AppendMenu(hMenu, MF_STRING, ID_TRAY_AUTOSTART, L"开机自启动");
+                AppendMenu(hMenu, MF_STRING, ID_TRAY_RELOADHOOKS, L"重新装载快捷键钩子");
                 AppendMenu(hMenu, MF_SEPARATOR, 0, NULL);
                 AppendMenu(hMenu, MF_STRING, ID_TRAY_QUIT, L"退出工具");
                 
@@ -4140,6 +4189,15 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             switch (wmId) {
                 case ID_TRAY_CAPTURE:
                     TriggerCapture();
+                    break;
+                case ID_TRAY_RELOADHOOKS:
+                    StopHooks();
+                    StartHooks();
+                    if (g_hMouseHook && g_hKeyHook) {
+                        ShowTrayNotification(L"SnapCapture", L"快捷键钩子已重新装载。", NIIF_INFO);
+                    } else {
+                        ShowTrayNotification(L"SnapCapture", L"钩子装载失败，请尝试重启程序。", NIIF_WARNING);
+                    }
                     break;
                 case ID_TRAY_SETTINGS: {
                     if (g_hWndSettings) {
@@ -4257,6 +4315,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     
     // 7. 安装全局底层热键与侧键 Hook
     StartHooks();
+    SetTimer(g_hWndMain, 2, 5000, NULL); // 5s 钩子看门狗
     
     // 8. 消息泵循环运行
     MSG msg;
