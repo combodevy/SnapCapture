@@ -10,6 +10,14 @@ SnapCapture is a lightweight, native Windows screenshot and annotation tool buil
 *   **Low Resource Footprint**: Uses double-buffered rendering and partial updates. Idle memory footprint is only about 2.5 MB.
 *   **DPI-Aware**: Seamlessly supports system-level High DPI scaling and multi-monitor setups, ensuring crisp screenshot capturing and rendering.
 
+## What's New in v1.3.0
+
+*   **New: Mosaic tool** — brush (6-150px continuous slider, live coverage-circle cursor) and rectangular modes; quality (4-40px blocks) on a continuous slider; pixelate/blur styles; persisted settings; undo/redo supported.
+*   **New: Scrolling long capture** — frame a region, scroll the page yourself; the app passively observes and stitches a full-length image. A floating side panel previews the result live (narrowing smoothly as it grows); when done, the full-resolution capture goes back into the frame for the regular copy/save flow. No input injection, no focus stealing, no cursor moves; scrolling back never duplicates content.
+*   **Fixed: text annotation offset** — committed text now matches the on-screen preview exactly; fixed emoji (surrogate pair) editing/deletion.
+*   **Improved: rendering performance** — cursor, strokes and hover updates redraw only the changed region for high frame rates.
+*   **UI** — rounded toolbar/panels/color chips, redesigned vector icons, slider controls, toolbar slide-in animation and icon hover feedback.
+
 ## Download
 
 Prefer not to build it yourself? Grab the latest `CaptureTool.exe` from the
