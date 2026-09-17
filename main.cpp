@@ -3102,12 +3102,15 @@ typedef const BYTE* (*LongRowGetter)(const void* ctx, int y);
 struct LongCanvasCtx {
     LongLockedBmp* locks;
     int totalH;
+    int lockCount;
 };
 
 static const BYTE* LongCanvasRowGet(const void* ctx, int y) {
     const LongCanvasCtx* c = (const LongCanvasCtx*)ctx;
     if (y < 0 || y >= c->totalH) return NULL;
-    const LongLockedBmp& lb = c->locks[y / LONG_STRIP_H];
+    int idx = y / LONG_STRIP_H;
+    if (idx >= c->lockCount) return NULL; // 越界防御
+    const LongLockedBmp& lb = c->locks[idx];
     return lb.base + (size_t)(y % LONG_STRIP_H) * lb.stride;
 }
 
@@ -3248,6 +3251,7 @@ static void LongStep(HWND hPanel) {
         if (ok) {
             canvasCtx.locks = locks.data();
             canvasCtx.totalH = g_longTotalH;
+            canvasCtx.lockCount = (int)locks.size();
         }
     }
     if (!ok) {
@@ -3290,6 +3294,7 @@ static void LongStep(HWND hPanel) {
             UnlockLongBitmap(lc);
             for (size_t i = 0; i < locks.size(); ++i) UnlockLongBitmap(locks[i]);
             TrimLongRows(ignoreBottom);
+            g_longTotalH -= ignoreBottom; // 先同步修剪后的真实高度，追加失败也不会越界
             if (AppendLongRows(cap, bestCy + 1, matchHeight)) {
                 g_longTotalH = newTotal;
                 appended = true;
@@ -3328,6 +3333,7 @@ static void LongStep(HWND hPanel) {
                     UnlockLongBitmap(lc);
                     UnlockLongBitmap(lp);
                     TrimLongRows(t);
+                    g_longTotalH -= t; // 先同步修剪后的真实高度，追加失败也不会越界
                     if (AppendLongRows(cap, bestCy + 1, matchHeight)) {
                         g_longTotalH = newTotal;
                         appended = true;
