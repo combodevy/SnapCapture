@@ -144,7 +144,9 @@ The Release workflow can also be triggered manually from GitHub with an explicit
 
 ## Known Limitations
 
-*   No scrolling / long screenshot capture, and no delayed capture.
+*   Long capture relies on the page responding to scrolling; pages full of animations/videos may not stitch well. The finished image cannot be re-annotated inside the frame.
+*   Long capture only stitches **downward**: scrolling back up never breaks or duplicates what was captured, but it also adds nothing. To capture content above your starting region, re-frame and start over.
+*   No delayed capture.
 *   Undo rewinds in the order annotations were added; deleting a selected element is not separately undoable.
 *   Single instance: launching a second copy only shows a warning, it does not trigger a new capture.
 
