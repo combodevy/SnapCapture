@@ -22,6 +22,7 @@ Prefer not to build it yourself? Grab the latest `CaptureTool.exe` from the
     *   **Freehand Selection**: Drag with the left mouse button to select any custom region, with eight-way resize handles and global panning support.
 2.  **Vector Annotation Tools**
     *   **Basic Shapes**: Draw rectangular frames (with custom, persistent round corner radius), ellipses, and vector arrows.
+    *   **Mosaic Redaction**: Brush (continuous 6-150px width slider with a live coverage-circle cursor) and rectangular mosaic modes, quality (4-40px blocks, continuous slider, persisted), with pixelate/blur styles; undo / redo applies as well.
     *   **Properties Adjustment**: Adjust brush thickness (2px, 4px, 8px) and annotation colors via the floating toolbar (with custom color selection).
     *   **Undo / Redo**: Step back through applied annotations and redo them again, from either the toolbar button or the keyboard.
 3.  **Text Annotation Engine**

@@ -8,7 +8,7 @@
   "auto_start": true,
   "save_to_clipboard": true,
   "save_directory": "",
-  "notification": true,
+  "notification": false,
   "custom_color_1": 4294967168,
   "custom_color_2": 4283025990,
   "custom_color_3": 4285762416,
@@ -29,6 +29,9 @@
   "dialog_color_14": 3951847,
   "dialog_color_15": 14391348,
   "dialog_color_16": 7457838,
-  "round_radius": 10,
-  "capture_mode": "region"
+  "round_radius": 5,
+  "mosaic_block": 12,
+  "mosaic_brush": 24,
+  "mosaic_style": 0,
+  "capture_mode": "window"
 }
