@@ -208,6 +208,7 @@ Gdiplus::Bitmap* g_longPrevCap = NULL; // 上一轮捕获（中继路径的对�
 bool g_longPrevValid = false;      // 画布尾部是否与 g_longPrevCap 逐行对齐
 int g_longDiagExt = -1, g_longDiagRun = -1, g_longDiagD = 0, g_longDiagApp = -1, g_longDiagPath = 0;
 int g_longDiagSum = -1;
+int g_longPollMs = 120;            // 当前轮询周期（中继续拼时自适应提速）
 int g_longPanelW = 0, g_longPanelH = 0, g_longPreviewH = 0;
 float g_longPanelScale = -1.0f;    // 面板预览当前缩放（动画插值用，-1=未初始化）
 Gdiplus::Bitmap* g_longFinalBmp = NULL;  // 全分辨率成品（输出用）
@@ -3369,6 +3370,12 @@ static void FinishLongStepTail(HWND hPanel, Bitmap* cap, bool appended,
     }
     if (appended) g_longStallCount = 0;
     else ++g_longStallCount;
+    // 自适应轮询：走中继说明用户在快速滚动，提速到 60ms 减少帧丢失；恢复正常后回到 120ms
+    int want = (diagPath == 2) ? 60 : 120;
+    if (want != g_longPollMs) {
+        g_longPollMs = want;
+        if (g_hWndLongPanel) SetTimer(g_hWndLongPanel, 1, want, NULL);
+    }
     if (g_hWndLongPanel) InvalidateRect(hPanel, NULL, FALSE);
 }
 
@@ -3411,8 +3418,8 @@ LRESULT CALLBACK LongPanelProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lP
                     : L"在页面上滚动即可拼接";
                 g.DrawString(hint.c_str(), -1, hintFont, RectF(12, 32, 200, 20), NULL, &hintBrush);
 
-                // 实时诊断：e=底部固定区 r=匹配行段 d=下滚 c=帧校验和 +=追加 p=路径
-                if (g_longDiagRun >= 0) {
+                // 诊断行：默认隐藏，按住 Shift 显示（e=底部固定区 r=匹配行段 d=下滚 c=帧校验和）
+                if ((GetAsyncKeyState(VK_SHIFT) & 0x8000) && g_longDiagRun >= 0) {
                     wstring diag = L"e" + ToWString(g_longDiagExt) + L" r" + ToWString(g_longDiagRun) +
                                    L" d" + ToWString(g_longDiagD) + L" c" + ToWString(g_longDiagSum) +
                                    (g_longDiagApp ? L" +" : L" -");
@@ -3532,7 +3539,8 @@ static void CreateLongPanel() {
         GetProcAddress(GetModuleHandle(L"user32.dll"), "SetWindowDisplayAffinity");
     if (pfnAffinity) pfnAffinity(g_hWndLongPanel, WDA_EXCLUDEFROMCAPTURE);
     ShowWindow(g_hWndLongPanel, SW_SHOW);
-    SetTimer(g_hWndLongPanel, 1, 120, NULL);
+    g_longPollMs = 120;
+    SetTimer(g_hWndLongPanel, 1, g_longPollMs, NULL);
 }
 
 static void FinishLongCapture() {
@@ -3545,10 +3553,15 @@ static void FinishLongCapture() {
         if (finalBmp && finalBmp->GetLastStatus() == Ok) {
             Graphics gf(finalBmp);
             int y = 0;
-            for (size_t i = 0; i < g_longStrips.size(); ++i) {
-                gf.DrawImage(g_longStrips[i], Rect(0, y, g_longRegionWidth, g_longStripHeights[i]),
-                             0, 0, g_longRegionWidth, g_longStripHeights[i], UnitPixel);
-                y += g_longStripHeights[i];
+            // 边拼接边释放条带：内存峰值从"条带池+成品"双份降为"成品+单条带"。
+            // 分配成品在前、消耗条带在后，成品分配失败时条带池原样保留（会话可恢复）。
+            while (!g_longStrips.empty()) {
+                gf.DrawImage(g_longStrips[0], Rect(0, y, g_longRegionWidth, g_longStripHeights[0]),
+                             0, 0, g_longRegionWidth, g_longStripHeights[0], UnitPixel);
+                y += g_longStripHeights[0];
+                delete g_longStrips[0];
+                g_longStrips.erase(g_longStrips.begin());
+                g_longStripHeights.erase(g_longStripHeights.begin());
             }
             if (g_longFinalBmp) delete g_longFinalBmp;
             g_longFinalBmp = finalBmp;
@@ -3601,6 +3614,8 @@ static void FinishLongCapture() {
     }
     if (g_longFinalHbmp) { DeleteObject(g_longFinalHbmp); g_longFinalHbmp = NULL; }
     g_longFinalBmp->GetHBITMAP(Color(255, 255, 255, 255), &g_longFinalHbmp);
+    delete g_longFinalBmp;      // HBITMAP 已独立持有全部像素，GDI+ 成品即刻释放
+    g_longFinalBmp = NULL;
     // 长图等比缩放放进屏幕中央的框内
     int vx = (g_screenWidth - vw) / 2;
     int vy = 40;
