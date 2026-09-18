@@ -3041,6 +3041,11 @@ static bool AppendLongRows(Bitmap* cur, int srcY0, int cnt) {
     return true;
 }
 
+// 面板双缓冲（文件级静态，WM_DESTROY 释放）
+static HDC g_longPanelMemDC = NULL;
+static HBITMAP g_longPanelMemBmp = NULL;
+static int g_longPanelMemW = 0, g_longPanelMemH = 0;
+
 static RECT LongBtnDoneRect() {
     int by = g_longPanelH - 46;
     RECT rc = { g_longPanelW - 102, by, g_longPanelW - 12, by + 34 };
@@ -3102,6 +3107,7 @@ typedef const BYTE* (*LongRowGetter)(const void* ctx, int y);
 
 struct LongCanvasCtx {
     LongLockedBmp* locks;
+    Bitmap** strips;
     int totalH;
     int lockCount;
 };
@@ -3110,8 +3116,10 @@ static const BYTE* LongCanvasRowGet(const void* ctx, int y) {
     const LongCanvasCtx* c = (const LongCanvasCtx*)ctx;
     if (y < 0 || y >= c->totalH) return NULL;
     int idx = y / LONG_STRIP_H;
-    if (idx >= c->lockCount) return NULL; // 越界防御
-    const LongLockedBmp& lb = c->locks[idx];
+    if (idx >= c->lockCount) return NULL;
+    LongLockedBmp& lb = c->locks[idx];
+    // 惰性锁定：只有扫描真正触碰到该条带才锁（每轮通常只需底部 2~3 条）
+    if (!lb.ok && !LockLongBitmap(c->strips[idx], lb)) return NULL;
     return lb.base + (size_t)(y % LONG_STRIP_H) * lb.stride;
 }
 
@@ -3240,20 +3248,16 @@ static void LongStep(HWND hPanel) {
     LongFrameCtx curCtx;
     bool ok = LockLongBitmap(cap, lc);
     LongCanvasCtx canvasCtx;
-    std::vector<LongLockedBmp> locks;
+    std::vector<LongLockedBmp> locks; // 惰性锁定槽位：与条带一一对应，扫描触碰才真正锁
     if (ok) {
         curCtx.base = lc.base;
         curCtx.stride = lc.stride;
         curCtx.height = h;
         locks.resize(g_longStrips.size());
-        for (size_t i = 0; i < locks.size(); ++i) {
-            if (!LockLongBitmap(g_longStrips[i], locks[i])) { ok = false; break; }
-        }
-        if (ok) {
-            canvasCtx.locks = locks.data();
-            canvasCtx.totalH = g_longTotalH;
-            canvasCtx.lockCount = (int)locks.size();
-        }
+        canvasCtx.locks = locks.data();
+        canvasCtx.totalH = g_longTotalH;
+        canvasCtx.lockCount = (int)locks.size();
+        canvasCtx.strips = g_longStrips.data();
     }
     if (!ok) {
         UnlockLongBitmap(lc);
@@ -3386,24 +3390,21 @@ LRESULT CALLBACK LongPanelProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lP
             HDC hdc = BeginPaint(hWnd, &ps);
             RECT rc;
             GetClientRect(hWnd, &rc);
-            // 面板双缓冲
-            static HDC s_memDC = NULL;
-            static HBITMAP s_memBmp = NULL;
-            static int s_w = 0, s_h = 0;
-            if (!s_memDC || s_w != rc.right || s_h != rc.bottom) {
-                if (s_memBmp) { DeleteObject(s_memBmp); s_memBmp = NULL; }
-                if (s_memDC) { DeleteDC(s_memDC); s_memDC = NULL; }
+            // 面板双缓冲（文件级静态，WM_DESTROY 时释放）
+            if (!g_longPanelMemDC || g_longPanelMemW != rc.right || g_longPanelMemH != rc.bottom) {
+                if (g_longPanelMemBmp) { DeleteObject(g_longPanelMemBmp); g_longPanelMemBmp = NULL; }
+                if (g_longPanelMemDC) { DeleteDC(g_longPanelMemDC); g_longPanelMemDC = NULL; }
                 HDC hScreen = GetDC(hWnd);
-                s_memDC = CreateCompatibleDC(hScreen);
-                s_memBmp = CreateCompatibleBitmap(hScreen, rc.right, rc.bottom);
-                SelectObject(s_memDC, s_memBmp);
+                g_longPanelMemDC = CreateCompatibleDC(hScreen);
+                g_longPanelMemBmp = CreateCompatibleBitmap(hScreen, rc.right, rc.bottom);
+                SelectObject(g_longPanelMemDC, g_longPanelMemBmp);
                 ReleaseDC(hWnd, hScreen);
-                s_w = rc.right;
-                s_h = rc.bottom;
+                g_longPanelMemW = rc.right;
+                g_longPanelMemH = rc.bottom;
             }
             bool animating = false;
             {
-                Graphics g(s_memDC);
+                Graphics g(g_longPanelMemDC);
                 g.SetSmoothingMode(SmoothingModeAntiAlias);
                 SolidBrush bg(Color(255, 24, 24, 28));
                 g.FillRectangle(&bg, Rect(0, 0, rc.right, rc.bottom));
@@ -3458,7 +3459,7 @@ LRESULT CALLBACK LongPanelProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lP
                 g.DrawString(L"完成", -1, btnFont, RectF(rDone.left, rDone.top, rDone.right - rDone.left, rDone.bottom - rDone.top), &sfC, &btnText);
                 g.DrawString(L"取消", -1, btnFont, RectF(rCancel.left, rCancel.top, rCancel.right - rCancel.left, rCancel.bottom - rCancel.top), &sfC, &btnText);
             }
-            BitBlt(hdc, 0, 0, rc.right, rc.bottom, s_memDC, 0, 0, SRCCOPY);
+            BitBlt(hdc, 0, 0, rc.right, rc.bottom, g_longPanelMemDC, 0, 0, SRCCOPY);
             EndPaint(hWnd, &ps);
             // 预览缩小动画：自驱动泵，收敛即停
             if (animating) InvalidateRect(hWnd, NULL, FALSE);
@@ -3483,6 +3484,10 @@ LRESULT CALLBACK LongPanelProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lP
         case WM_DESTROY:
             if (g_hWndLongPanel == hWnd) g_hWndLongPanel = NULL;
             KillTimer(hWnd, 1);
+            if (g_longPanelMemBmp) { DeleteObject(g_longPanelMemBmp); g_longPanelMemBmp = NULL; }
+            if (g_longPanelMemDC) { DeleteDC(g_longPanelMemDC); g_longPanelMemDC = NULL; }
+            g_longPanelMemW = 0;
+            g_longPanelMemH = 0;
             return 0;
         default:
             return DefWindowProc(hWnd, message, wParam, lParam);
