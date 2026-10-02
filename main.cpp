@@ -112,7 +112,6 @@ AppConfig g_config;
 wstring g_configPath = L"";
 
 #define WM_HOTKEY_RECORDED (WM_USER + 102)
-#define WM_OCR_DONE (WM_USER + 103)
 bool g_isRecordingHotkey = false;
 HotkeyConfig g_recordedHotkey;
 
@@ -218,11 +217,6 @@ HBITMAP g_longFinalHbmp = NULL;    // 成品的 HBITMAP 视图（剪贴板/保�
 
 int g_longFinalW = 0, g_longFinalH = 0; // 长图成品尺寸（条带释放后标签/缩放仍需使用）
 
-// 文字识别（OCR）状态
-bool g_ocrPanelActive = false;     // 结果面板已打开
-volatile LONG g_ocrBusy = 0;       // 后台识别进行中
-HWND g_hWndOcrPanel = NULL;        // 结果面板窗口
-volatile LONG g_ocrGen = 0;        // 会话代计数：复位/重扫后旧线程结果作废
 
 // 新增：高保真交互控制状态
 bool g_isHoveringRoundRadius = false;
@@ -723,7 +717,6 @@ void RedoShape();
 void DoCaptureConfirm(HWND hWnd);
 void DoCaptureSaveAs(HWND hWnd);
 void FreeLongStrips();
-void CloseOcrPanel();
 
 // ========== 兼容性 wstring 转换函数 ==========
 wstring ToWString(int val) {
@@ -992,9 +985,6 @@ void ResetOverlaySessionState() {
     g_shapes.clear();
     g_redoStack.clear();
     g_annotationMode = ANNOTATION_NONE;
-    // OCR 面板随会话复位销毁（线程结果由代计数器自然作废）
-    CloseOcrPanel();
-    ++g_ocrGen;
 }
 
 // ========== 撤销 / 重做 ==========
@@ -1572,8 +1562,8 @@ vector<ToolbarButton> GetToolbarButtons(const RECT& sel, int width, int height) 
         return btns;
     }
 
-    // 12个按钮，2个分割线区域，加上左右 padding
-    int total_w = btn_w * 12 + spacing * 9 + sep_w * 2 + 20;
+    // 11个按钮，2个分割线区域，加上左右 padding
+    int total_w = btn_w * 11 + spacing * 8 + sep_w * 2 + 20;
     int total_h = btn_h + 12;
     if (g_annotationMode != ANNOTATION_NONE) {
         total_h += 44; // 预留属性子工具栏的空间 (增大到 44px)
@@ -1600,7 +1590,7 @@ vector<ToolbarButton> GetToolbarButtons(const RECT& sel, int width, int height) 
     int start_y = ty + 6;
     
     // 计算每个按钮的 X 轴坐标
-    // 组 1: 矩形, 圆形, 箭头, 画笔, 马赛克, 文字, 扫描, 长截屏 (8个)
+    // 组 1: 矩形, 圆形, 箭头, 画笔, 马赛克, 文字, 长截屏 (7个)
     int x0 = start_x;
     int x1 = x0 + btn_w + spacing;
     int x2 = x1 + btn_w + spacing;
@@ -1608,15 +1598,14 @@ vector<ToolbarButton> GetToolbarButtons(const RECT& sel, int width, int height) 
     int x4 = x3 + btn_w + spacing;
     int x5 = x4 + btn_w + spacing;
     int x6 = x5 + btn_w + spacing;
-    int x7 = x6 + btn_w + spacing;
 
     // 组 2: 撤销 (1个，在分割线 1 之后)
-    int x8 = x7 + btn_w + sep_w;
+    int x7 = x6 + btn_w + sep_w;
 
     // 组 3: 保存, 取消, 确定 (3个，在分割线 2 之后)
-    int x9 = x8 + btn_w + sep_w;
+    int x8 = x7 + btn_w + sep_w;
+    int x9 = x8 + btn_w + spacing;
     int x10 = x9 + btn_w + spacing;
-    int x11 = x10 + btn_w + spacing;
     
     // 1. 矩形
     ToolbarButton bRect;
@@ -1660,44 +1649,37 @@ vector<ToolbarButton> GetToolbarButtons(const RECT& sel, int width, int height) 
     bText.color = Color(255, 200, 200, 200);
     btns.push_back(bText);
 
-    // 7. 扫描文字（放大镜 + 文字行）
-    ToolbarButton bScan;
-    bScan.rect = { x6, start_y, x6 + btn_w, start_y + btn_h };
-    bScan.text = L"scan";
-    bScan.color = Color(255, 200, 200, 200);
-    btns.push_back(bScan);
-
-    // 8. 长截屏
+    // 7. 长截屏
     ToolbarButton bLong;
-    bLong.rect = { x7, start_y, x7 + btn_w, start_y + btn_h };
+    bLong.rect = { x6, start_y, x6 + btn_w, start_y + btn_h };
     bLong.text = L"long";
     bLong.color = Color(255, 200, 200, 200);
     btns.push_back(bLong);
 
-    // 9. 撤销
+    // 8. 撤销
     ToolbarButton bUndo;
-    bUndo.rect = { x8, start_y, x8 + btn_w, start_y + btn_h };
+    bUndo.rect = { x7, start_y, x7 + btn_w, start_y + btn_h };
     bUndo.text = L"undo";
     bUndo.color = Color(255, 200, 200, 200);
     btns.push_back(bUndo);
 
-    // 10. 保存
+    // 9. 保存
     ToolbarButton bSave;
-    bSave.rect = { x9, start_y, x9 + btn_w, start_y + btn_h };
+    bSave.rect = { x8, start_y, x8 + btn_w, start_y + btn_h };
     bSave.text = L"save";
     bSave.color = Color(255, 200, 200, 200);
     btns.push_back(bSave);
 
-    // 11. 取消 (红色)
+    // 10. 取消 (红色)
     ToolbarButton bCancel;
-    bCancel.rect = { x10, start_y, x10 + btn_w, start_y + btn_h };
+    bCancel.rect = { x9, start_y, x9 + btn_w, start_y + btn_h };
     bCancel.text = L"cancel";
     bCancel.color = Color(255, 240, 92, 92); // 软红色
     btns.push_back(bCancel);
 
-    // 12. 确定 (绿色)
+    // 11. 确定 (绿色)
     ToolbarButton bConfirm;
-    bConfirm.rect = { x11, start_y, x11 + btn_w, start_y + btn_h };
+    bConfirm.rect = { x10, start_y, x10 + btn_w, start_y + btn_h };
     bConfirm.text = L"confirm";
     bConfirm.color = Color(255, 46, 204, 113); // 软绿色
     btns.push_back(bConfirm);
@@ -2394,7 +2376,6 @@ void DrawOverlay(HWND hWnd, HDC hdc) {
                 else if (i == 3 && g_annotationMode == ANNOTATION_PENCIL) isActive = true;
                 else if (i == 4 && g_annotationMode == ANNOTATION_MOSAIC) isActive = true;
                 else if (i == 5 && g_annotationMode == ANNOTATION_TEXT) isActive = true;
-                else if (i == 6 && g_ocrPanelActive) isActive = true; // 扫描按钮在 OCR 面板打开时高亮
                 
                 // A. 绘制按钮背景
                 if (isActive) {
@@ -2417,13 +2398,13 @@ void DrawOverlay(HWND hWnd, HDC hdc) {
                     // 预览模式 [保存/取消/确定] 与普通模式的 取消/确认 悬停变色
                     int hoverIdx = -1;
                     if (g_longPreviewActive) {
-                        if (i == 1) hoverIdx = 10;      // 取消 → 红
-                        else if (i == 2) hoverIdx = 11; // 确定 → 绿
+                        if (i == 1) hoverIdx = 9;      // 取消 → 红
+                        else if (i == 2) hoverIdx = 10; // 确定 → 绿
                     } else {
                         hoverIdx = (int)i;
                     }
-                    if (hoverIdx == 10) iconColor = Color(255, 255, 70, 70); // 悬停红更亮 (取消)
-                    else if (hoverIdx == 11) iconColor = Color(255, 70, 230, 130); // 悬停绿更亮 (确定)
+                    if (hoverIdx == 9) iconColor = Color(255, 255, 70, 70); // 悬停红更亮 (取消)
+                    else if (hoverIdx == 10) iconColor = Color(255, 70, 230, 130); // 悬停绿更亮 (确定)
                     else iconColor = Color(255, 255, 255, 255); // 普通白亮
                 }
                 
@@ -2490,14 +2471,7 @@ void DrawOverlay(HWND hWnd, HDC hdc) {
                         g.DrawLine(&iconPen, cx, cy - 5.5f, cx, cy + 7.0f);                 // 竖笔
                         break;
                     }
-                    case 6: { // 扫描文字（放大镜 + 镜内文字行）
-                        g.DrawEllipse(&iconPen, cx - 7.0f, cy - 7.0f, 11.0f, 11.0f);
-                        g.DrawLine(&iconPen, cx + 3.5f, cy + 3.5f, cx + 8.5f, cy + 8.5f);   // 镜柄
-                        g.DrawLine(&iconPen, cx - 4.5f, cy - 3.5f, cx + 1.5f, cy - 3.5f);   // 镜内文字行 1
-                        g.DrawLine(&iconPen, cx - 4.5f, cy - 0.5f, cx + 1.5f, cy - 0.5f);   // 镜内文字行 2
-                        break;
-                    }
-                    case 7: { // 长截屏（页面 + 底部向下箭头）
+                    case 6: { // 长截屏（页面 + 底部向下箭头）
                         DrawRoundedRectangle(g, &iconPen, cx - 6.5f, cy - 9.0f, 13.0f, 12.0f, 2.0f);
                         g.DrawLine(&iconPen, cx - 3.5f, cy - 5.5f, cx + 3.5f, cy - 5.5f);
                         g.DrawLine(&iconPen, cx - 3.5f, cy - 2.5f, cx + 3.5f, cy - 2.5f);
@@ -2506,7 +2480,7 @@ void DrawOverlay(HWND hWnd, HDC hdc) {
                         g.DrawLine(&iconPen, cx + 3.5f, cy + 5.5f, cx, cy + 9.0f);
                         break;
                     }
-                    case 8: { // 撤销（逆时针 3/4 圆弧，箭头贴弧线终点指向行进方向）
+                    case 7: { // 撤销（逆时针 3/4 圆弧，箭头贴弧线终点指向行进方向）
                         Pen undoPen(iconColor, 2.0f);
                         undoPen.SetStartCap(LineCapRound);
                         undoPen.SetEndCap(LineCapRound);
@@ -2516,7 +2490,7 @@ void DrawOverlay(HWND hWnd, HDC hdc) {
                         g.DrawLine(&undoPen, cx, cy - 7.5f, cx + 4.7f, cy - 5.6f);
                         break;
                     }
-                    case 9: { // 保存（下载托盘：向下的箭头 + 底部承托槽）
+                    case 8: { // 保存（下载托盘：向下的箭头 + 底部承托槽）
                         g.DrawLine(&iconPen, cx, cy - 8.0f, cx, cy + 2.5f);                 // 箭杆
                         g.DrawLine(&iconPen, cx, cy + 2.5f, cx - 4.5f, cy - 2.0f);          // 左翼
                         g.DrawLine(&iconPen, cx, cy + 2.5f, cx + 4.5f, cy - 2.0f);          // 右翼
@@ -2525,12 +2499,12 @@ void DrawOverlay(HWND hWnd, HDC hdc) {
                         g.DrawLine(&iconPen, cx + 8.0f, cy + 8.0f, cx + 8.0f, cy + 4.5f);   // 托盘右壁
                         break;
                     }
-                    case 10: { // 取消
+                    case 9: { // 取消
                         g.DrawLine(&iconPen, cx - 6.5f, cy - 6.5f, cx + 6.5f, cy + 6.5f);
                         g.DrawLine(&iconPen, cx + 6.5f, cy - 6.5f, cx - 6.5f, cy + 6.5f);
                         break;
                     }
-                    case 11: { // 确定
+                    case 10: { // 确定
                         g.DrawLine(&iconPen, cx - 7.5f, cy + 0.5f, cx - 2.5f, cy + 5.5f);
                         g.DrawLine(&iconPen, cx - 2.5f, cy + 5.5f, cx + 7.5f, cy - 5.0f);
                         break;
@@ -2541,15 +2515,15 @@ void DrawOverlay(HWND hWnd, HDC hdc) {
             }
 
             // 绘制分割线
-            if (buttons.size() >= 10) {
+            if (buttons.size() >= 9) {
                 Pen sepPen(Color(255, 55, 55, 55), 1.0f);
 
-                // 分割线 1 (扫描 | 长截屏) 之后是 撤销
-                int sep1_x = (buttons[7].rect.right + buttons[8].rect.left) / 2;
+                // 分割线 1 (长截屏 | 撤销)
+                int sep1_x = (buttons[6].rect.right + buttons[7].rect.left) / 2;
                 g.DrawLine(&sepPen, (REAL)sep1_x, (REAL)(min_y + 8), (REAL)sep1_x, (REAL)(max_y - 8));
 
                 // 分割线 2 (撤销 | 保存)
-                int sep2_x = (buttons[8].rect.right + buttons[9].rect.left) / 2;
+                int sep2_x = (buttons[7].rect.right + buttons[8].rect.left) / 2;
                 g.DrawLine(&sepPen, (REAL)sep2_x, (REAL)(min_y + 8), (REAL)sep2_x, (REAL)(max_y - 8));
             }
             
@@ -3749,515 +3723,6 @@ static void EnterScrollCapture(HWND hWnd) {
     }
 }
 
-// ========== 文字识别（Windows.Media.Ocr 纯 ABI，零依赖）==========
-// 设计要点（全部经独立测试程序在真实环境验证）：
-// - UI 线程零 WinRT 调用：像素提取（GDI）后交后台线程做 RoInitialize→识别→拍平纯数据
-// - 结果经 WM_OCR_DONE 投递回 g_hWndMain，携带代计数，过期结果直接丢弃
-// - 语言选择 zh-Hans 优先，回退用户语言包；无语言包时面板给出指引
-// - CJK 相邻空格为引擎伪影，输出前清理
-// 关键槽位（0 基，前 6 槽为 IInspectable）：
-//   IOcrEngineStatics: 7=get_AvailableRecognizerLanguages 9=TryCreateFromLanguage 10=TryCreateFromUserProfileLanguages
-//   IOcrEngine: 6=RecognizeAsync
-//   IOcrResult: 6=get_Lines 8=get_Text；IOcrLine: 7=get_Text
-//   ISoftwareBitmapStatics: 9=CreateCopyFromBuffer；IDataWriter: 12=WriteBytes 31=DetachBuffer
-//   IAsyncInfo: 7=get_Status(0进行/1完成/2+失败)；IAsyncOperation: 8=GetResults
-
-typedef LONG (__stdcall* OcrRoInitialize_t)(int);
-typedef void (__stdcall* OcrRoUninitialize_t)();
-typedef LONG (__stdcall* OcrRoGetActivationFactory_t)(void*, const void*, void**);
-typedef LONG (__stdcall* OcrRoActivateInstance_t)(void*, void**);
-typedef LONG (__stdcall* OcrWindowsCreateString_t)(const wchar_t*, UINT32, void**);
-typedef LONG (__stdcall* OcrWindowsDeleteString_t)(void*);
-typedef const wchar_t* (__stdcall* OcrGetRawBuf_t)(void*, UINT32*);
-
-static OcrRoInitialize_t pOcrRoInitialize;
-static OcrRoUninitialize_t pOcrRoUninitialize;
-static OcrRoGetActivationFactory_t pOcrRoGetActivationFactory;
-static OcrRoActivateInstance_t pOcrRoActivateInstance;
-static OcrWindowsCreateString_t pOcrWindowsCreateString;
-static OcrWindowsDeleteString_t pOcrWindowsDeleteString;
-static OcrGetRawBuf_t pOcrGetStringRawBuffer;
-static bool g_ocrAbiReady = false;
-
-static const IID OCR_IID_IOcrEngineStatics = { 0x5BFFA85A, 0x3384, 0x3540, { 0x99, 0x40, 0x69, 0x91, 0x20, 0xD4, 0x28, 0xA8 } };
-static const IID OCR_IID_ISoftwareBitmapStatics = { 0xDF0385DB, 0x672F, 0x4A9D, { 0x80, 0x6E, 0xC2, 0x44, 0x2F, 0x34, 0x3E, 0x86 } };
-static const IID OCR_IID_IAsyncInfo = { 0x00000036, 0x0000, 0x0000, { 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46 } };
-
-static void OcrRelease(void* obj) {
-    if (!obj) return;
-    void** vtbl = *(void***)obj;
-    typedef ULONG (__stdcall* Rel_t)(void*);
-    ((Rel_t)vtbl[1])(obj);
-}
-
-static bool OcrAbiInit() {
-    if (g_ocrAbiReady) return true;
-    HMODULE cb = GetModuleHandleW(L"combase.dll");
-    if (!cb) cb = LoadLibraryW(L"combase.dll");
-    if (!cb) return false;
-    pOcrRoInitialize = (OcrRoInitialize_t)GetProcAddress(cb, "RoInitialize");
-    pOcrRoUninitialize = (OcrRoUninitialize_t)GetProcAddress(cb, "RoUninitialize");
-    pOcrRoGetActivationFactory = (OcrRoGetActivationFactory_t)GetProcAddress(cb, "RoGetActivationFactory");
-    pOcrRoActivateInstance = (OcrRoActivateInstance_t)GetProcAddress(cb, "RoActivateInstance");
-    pOcrWindowsCreateString = (OcrWindowsCreateString_t)GetProcAddress(cb, "WindowsCreateString");
-    pOcrWindowsDeleteString = (OcrWindowsDeleteString_t)GetProcAddress(cb, "WindowsDeleteString");
-    pOcrGetStringRawBuffer = (OcrGetRawBuf_t)GetProcAddress(cb, "WindowsGetStringRawBuffer");
-    g_ocrAbiReady = pOcrRoInitialize && pOcrRoGetActivationFactory && pOcrRoActivateInstance &&
-                    pOcrWindowsCreateString && pOcrWindowsDeleteString && pOcrGetStringRawBuffer && pOcrRoUninitialize;
-    return g_ocrAbiReady;
-}
-
-// 后台线程的识别请求/结果（堆分配，跨线程所有权转移）
-struct OcrTask {
-    int w, h;
-    BYTE* pixels;            // BGRA 自底向上？不——GetDIBits 负高=顶向下，直接可用
-    LONG gen;                // 发起时的会话代
-    bool ok;
-    std::wstring error;      // 失败原因（面向用户）
-    std::vector<std::wstring> lines;
-};
-
-static bool OcrIsCjk(wchar_t c) {
-    return (c >= 0x4E00 && c <= 0x9FFF) ||   // CJK 统一表意
-           (c >= 0x3000 && c <= 0x303F) ||   // CJK 标点
-           (c >= 0xFF00 && c <= 0xFFEF) ||   // 全角形式
-           (c >= 0x3400 && c <= 0x4DBF);     // 扩展 A
-}
-
-// 清理 Windows OCR 在 CJK 字符间插入的伪影空格
-static std::wstring OcrCleanLine(const std::wstring& s) {
-    std::wstring out;
-    out.reserve(s.size());
-    for (size_t i = 0; i < s.size(); ++i) {
-        wchar_t c = s[i];
-        if (c == L' ' || c == L'\u3000') {
-            wchar_t prev = out.empty() ? 0 : out.back();
-            wchar_t next = (i + 1 < s.size()) ? s[i + 1] : 0;
-            if (prev && next && OcrIsCjk(prev) && OcrIsCjk(next)) continue; // CJK|CJK 之间的空格丢弃
-            if (prev && OcrIsCjk(prev) && (next == 0 || next == L' ')) continue; // 行尾空格丢弃
-        }
-        out.push_back(c);
-    }
-    // 收尾：去行尾空白
-    while (!out.empty() && (out.back() == L' ')) out.pop_back();
-    return out;
-}
-
-// 后台线程主体：完整 WinRT OCR 管线（与验证过的独立测试同构）
-static DWORD WINAPI OcrWorkerThread(LPVOID param) {
-    OcrTask* task = (OcrTask*)param;
-    task->ok = false;
-
-    do {
-        if (!OcrAbiInit()) { task->error = L"系统不支持 Windows OCR（需要 Windows 10+）。"; break; }
-        HRESULT hr = pOcrRoInitialize(1); // RO_INIT_MULTITHREADED
-        if (FAILED(hr) && hr != (HRESULT)0x80010106) { task->error = L"OCR 运行时初始化失败。"; break; }
-        bool needUninit = !FAILED(hr);
-
-        void* hCls = NULL;
-        void* ocrStatics = NULL;
-        void* sbStatics = NULL;
-        void* engine = NULL;
-        void* dw = NULL;
-        void* ibuf = NULL;
-        void* sb = NULL;
-        void* async = NULL;
-        void* asyncInfo = NULL;
-        void* result = NULL;
-
-        do {
-            // 1. 工厂
-            if (FAILED(pOcrWindowsCreateString(L"Windows.Media.Ocr.OcrEngine", (UINT32)wcslen(L"Windows.Media.Ocr.OcrEngine"), &hCls)) ||
-                FAILED(pOcrRoGetActivationFactory(hCls, &OCR_IID_IOcrEngineStatics, &ocrStatics))) {
-                task->error = L"系统 OCR 组件不可用（需要 Windows 10+）。"; break;
-            }
-            pOcrWindowsDeleteString(hCls); hCls = NULL;
-            if (FAILED(pOcrWindowsCreateString(L"Windows.Graphics.Imaging.SoftwareBitmap", (UINT32)wcslen(L"Windows.Graphics.Imaging.SoftwareBitmap"), &hCls)) ||
-                FAILED(pOcrRoGetActivationFactory(hCls, &OCR_IID_ISoftwareBitmapStatics, &sbStatics))) {
-                task->error = L"系统图像组件不可用。"; break;
-            }
-            pOcrWindowsDeleteString(hCls); hCls = NULL;
-
-            // 2. 选语言（zh-Hans 优先，其次用户语言包）
-            typedef HRESULT (__stdcall* GetPtr_t)(void*, void**);
-            typedef HRESULT (__stdcall* GetHStr_t)(void*, void**);
-            typedef HRESULT (__stdcall* GetSize_t)(void*, int*);
-            void** fvt = *(void***)ocrStatics;
-            void* langList = NULL;
-            ((GetPtr_t)fvt[7])(ocrStatics, &langList);
-            void* lang = NULL;
-            if (langList) {
-                void** lvt = *(void***)langList;
-                typedef HRESULT (__stdcall* GetAt_t)(void*, int, void**);
-                int count = 0;
-                ((GetSize_t)lvt[7])(langList, &count);
-                int best = -1;
-                for (int i = 0; i < count; ++i) {
-                    void* l = NULL;
-                    if (FAILED(((GetAt_t)lvt[6])(langList, i, &l)) || !l) continue;
-                    void** lv = *(void***)l;
-                    void* hTag = NULL;
-                    ((GetHStr_t)lv[6])(l, &hTag);
-                    UINT32 len = 0;
-                    const wchar_t* w = hTag ? pOcrGetStringRawBuffer(hTag, &len) : NULL;
-                    std::wstring t(w ? w : L"", len);
-                    if (hTag) pOcrWindowsDeleteString(hTag);
-                    int score = -1;
-                    if (t.rfind(L"zh-Hans", 0) == 0) score = 100;
-                    else if (t.rfind(L"zh-Hant", 0) == 0) score = 80;
-                    else if (t.rfind(L"zh", 0) == 0) score = 60;
-                    else score = 40; // 任意可用语言兜底
-                    if (score > best) { best = score; if (lang) OcrRelease(lang); lang = l; }
-                    else OcrRelease(l);
-                }
-                OcrRelease(langList);
-            }
-            if (lang) {
-                typedef HRESULT (__stdcall* TryFromLang_t)(void*, void*, void**);
-                ((TryFromLang_t)fvt[9])(ocrStatics, lang, &engine);
-                OcrRelease(lang);
-            } else {
-                typedef HRESULT (__stdcall* TryProfile_t)(void*, void**);
-                ((TryProfile_t)fvt[10])(ocrStatics, &engine);
-            }
-            if (!engine) {
-                task->error = L"未找到可用的 OCR 语言包。\n可在 系统设置 → 时间和语言 → 语言和区域 中添加中文语言并勾选\"文本识别\"功能。";
-                break;
-            }
-
-            // 3. 像素 → DataWriter → IBuffer → SoftwareBitmap(Bgra8)
-            if (FAILED(pOcrWindowsCreateString(L"Windows.Storage.Streams.DataWriter", (UINT32)wcslen(L"Windows.Storage.Streams.DataWriter"), &hCls)) ||
-                FAILED(pOcrRoActivateInstance(hCls, &dw))) {
-                task->error = L"系统流组件不可用。"; break;
-            }
-            pOcrWindowsDeleteString(hCls); hCls = NULL;
-            void** dwt = *(void***)dw;
-            typedef HRESULT (__stdcall* WriteBytes_t)(void*, UINT32, BYTE*);
-            typedef HRESULT (__stdcall* DetachBuffer_t)(void*, void**);
-            if (FAILED(((WriteBytes_t)dwt[12])(dw, (UINT32)((size_t)task->w * task->h * 4), task->pixels)) ||
-                FAILED(((DetachBuffer_t)dwt[31])(dw, &ibuf)) || !ibuf) {
-                task->error = L"图像数据写入失败。"; break;
-            }
-            OcrRelease(dw); dw = NULL;
-            void** svt = *(void***)sbStatics;
-            typedef HRESULT (__stdcall* CopyFromBuffer_t)(void*, void*, int, int, int, void**);
-            if (FAILED(((CopyFromBuffer_t)svt[9])(sbStatics, ibuf, 87, task->w, task->h, &sb)) || !sb) {
-                task->error = L"图像转换失败。"; break;
-            }
-            OcrRelease(ibuf); ibuf = NULL;
-
-            // 4. RecognizeAsync + 轮询（IAsyncInfo slot 7；0=进行 1=完成）
-            void** evt = *(void***)engine;
-            typedef HRESULT (__stdcall* RecogAsync_t)(void*, void*, void**);
-            if (FAILED(((RecogAsync_t)evt[6])(engine, sb, &async)) || !async) {
-                task->error = L"识别启动失败。"; break;
-            }
-            if (FAILED((*(HRESULT (__stdcall**)(void*, const IID*, void**))(*(void***)async))(async, &OCR_IID_IAsyncInfo, &asyncInfo)) || !asyncInfo) {
-                task->error = L"识别状态查询失败。"; break;
-            }
-            void** aivt = *(void***)asyncInfo;
-            typedef HRESULT (__stdcall* GetUint_t)(void*, UINT32*);
-            UINT32 st = 0;
-            bool done = false;
-            for (int i = 0; i < 600; ++i) {
-                st = 0xFFFF;
-                ((GetUint_t)aivt[7])(asyncInfo, &st);
-                if (st == 1) { done = true; break; }
-                if (st >= 2) break;
-                Sleep(20);
-            }
-            if (!done) { task->error = L"识别超时，请重试。"; break; }
-
-            // 5. GetResults（IAsyncOperation slot 8，在原 async 指针上）→ 拍平行文本
-            typedef HRESULT (__stdcall* GetResults_t)(void*, void**);
-            void** asyncVtbl = *(void***)async;
-            if (FAILED(((GetResults_t)asyncVtbl[8])(async, &result)) || !result) {
-                task->error = L"识别结果获取失败。"; break;
-            }
-            void** rvt = *(void***)result;
-            void* linesList = NULL;
-            ((GetPtr_t)rvt[6])(result, &linesList);
-            if (linesList) {
-                void** lvt = *(void***)linesList;
-                typedef HRESULT (__stdcall* GetAt2_t)(void*, int, void**);
-                int count = 0;
-                ((GetSize_t)lvt[7])(linesList, &count);
-                for (int i = 0; i < count; ++i) {
-                    void* line = NULL;
-                    if (FAILED(((GetAt2_t)lvt[6])(linesList, i, &line)) || !line) continue;
-                    void** lnvt = *(void***)line;
-                    void* hText = NULL;
-                    ((GetHStr_t)lnvt[7])(line, &hText);
-                    if (hText) {
-                        UINT32 len = 0;
-                        const wchar_t* w = pOcrGetStringRawBuffer(hText, &len);
-                        std::wstring cleaned = OcrCleanLine(std::wstring(w ? w : L"", len));
-                        if (!cleaned.empty()) task->lines.push_back(cleaned);
-                        pOcrWindowsDeleteString(hText);
-                    }
-                    OcrRelease(line);
-                }
-                OcrRelease(linesList);
-            }
-            task->ok = true;
-        } while (false);
-
-        // 统一释放
-        if (result) OcrRelease(result);
-        if (asyncInfo) OcrRelease(asyncInfo);
-        if (async) OcrRelease(async);
-        if (sb) OcrRelease(sb);
-        if (ibuf) OcrRelease(ibuf);
-        if (dw) OcrRelease(dw);
-        if (engine) OcrRelease(engine);
-        if (sbStatics) OcrRelease(sbStatics);
-        if (ocrStatics) OcrRelease(ocrStatics);
-        if (hCls) pOcrWindowsDeleteString(hCls);
-        if (needUninit) pOcrRoUninitialize();
-    } while (false);
-
-    InterlockedExchange(&g_ocrBusy, 0);
-    PostMessage(g_hWndMain, WM_OCR_DONE, (WPARAM)task->gen, (LPARAM)task);
-    return 0;
-}
-
-// ---------- OCR 结果面板（EDIT 控件 + 按钮）----------
-
-#define OCR_BTN_COPY   2001
-#define OCR_BTN_RESCAN 2002
-#define OCR_BTN_CLOSE  2003
-
-static void OcrSetPanelText(const std::wstring& text) {
-    if (!g_hWndOcrPanel) return;
-    HWND hEdit = GetDlgItem(g_hWndOcrPanel, 1001);
-    if (hEdit) SetWindowTextW(hEdit, text.c_str());
-}
-
-static void OcrFillPanelWithTask(OcrTask* task) {
-    if (!g_hWndOcrPanel) return;
-    if (!task->ok) {
-        OcrSetPanelText(L"识别失败：\n\n" + task->error);
-        return;
-    }
-    if (task->lines.empty()) {
-        OcrSetPanelText(L"未在选定区域中识别到文字。\n\n可尝试框选更清晰的区域后点\"重新识别\"。");
-        return;
-    }
-    std::wstring all;
-    for (size_t i = 0; i < task->lines.size(); ++i) {
-        if (i) all += L"\r\n";
-        all += task->lines[i];
-    }
-    OcrSetPanelText(all);
-    // 光标置顶
-    HWND hEdit = GetDlgItem(g_hWndOcrPanel, 1001);
-    if (hEdit) {
-        SendMessage(hEdit, EM_SETSEL, 0, 0);
-        SendMessage(hEdit, EM_SCROLLCARET, 0, 0);
-    }
-    SetFocus(hEdit);
-}
-
-static void OcrPanelLayout(HWND hWnd) {
-    RECT rc;
-    GetClientRect(hWnd, &rc);
-    int w = rc.right, h = rc.bottom;
-    HWND hEdit = GetDlgItem(hWnd, 1001);
-    if (hEdit) MoveWindow(hEdit, 8, 34, w - 16, h - 34 - 46, TRUE);
-    int btnY = h - 42;
-    HWND hCopy = GetDlgItem(hWnd, OCR_BTN_COPY);
-    HWND hRescan = GetDlgItem(hWnd, OCR_BTN_RESCAN);
-    HWND hClose = GetDlgItem(hWnd, OCR_BTN_CLOSE);
-    if (hClose) MoveWindow(hClose, w - 96, btnY, 88, 32, TRUE);
-    if (hRescan) MoveWindow(hRescan, w - 196, btnY, 88, 32, TRUE);
-    if (hCopy) MoveWindow(hCopy, w - 296, btnY, 88, 32, TRUE);
-}
-
-static void StartOcrScan();
-
-LRESULT CALLBACK OcrPanelProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) {
-    switch (message) {
-        case WM_CREATE: {
-            HFONT hFont = CreateFontW(18, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
-                                      OUT_OUTLINE_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                                      DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei");
-            HWND hTitle = CreateWindowExW(0, L"STATIC", L"文字识别结果 — 可直接选择复制",
-                                          WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
-                                          8, 6, 380, 24, hWnd, (HMENU)1000, g_hInstance, NULL);
-            SendMessage(hTitle, WM_SETFONT, (WPARAM)hFont, TRUE);
-
-            HWND hEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
-                                         WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE |
-                                         ES_AUTOVSCROLL | ES_WANTRETURN,
-                                         8, 34, 100, 100, hWnd, (HMENU)1001, g_hInstance, NULL);
-            SendMessage(hEdit, WM_SETFONT, (WPARAM)hFont, TRUE);
-
-            struct { int id; const wchar_t* text; } btns[] = {
-                { OCR_BTN_COPY,   L"复制全部" },
-                { OCR_BTN_RESCAN, L"重新识别" },
-                { OCR_BTN_CLOSE,  L"关闭" },
-            };
-            for (int i = 0; i < 3; ++i) {
-                HWND hb = CreateWindowExW(0, L"BUTTON", btns[i].text,
-                                          WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                                          0, 0, 88, 32, hWnd, (HMENU)(INT_PTR)btns[i].id, g_hInstance, NULL);
-                SendMessage(hb, WM_SETFONT, (WPARAM)hFont, TRUE);
-            }
-            OcrPanelLayout(hWnd);
-            break;
-        }
-        case WM_SIZE:
-            OcrPanelLayout(hWnd);
-            break;
-        case WM_ERASEBKGND:
-            return 1;
-        case WM_CTLCOLORSTATIC: {
-            HDC hdc = (HDC)wParam;
-            SetTextColor(hdc, RGB(235, 235, 238));
-            SetBkColor(hdc, RGB(24, 24, 28));
-            static HBRUSH s_bg = CreateSolidBrush(RGB(24, 24, 28));
-            return (INT_PTR)s_bg;
-        }
-        case WM_KEYDOWN:
-            if (wParam == VK_ESCAPE) { CloseOcrPanel(); return 0; }
-            break;
-        case WM_COMMAND: {
-            int id = LOWORD(wParam);
-            if (id == OCR_BTN_CLOSE) {
-                CloseOcrPanel();
-            } else if (id == OCR_BTN_COPY) {
-                HWND hEdit = GetDlgItem(hWnd, 1001);
-                if (hEdit) {
-                    SendMessage(hEdit, EM_SETSEL, 0, -1);
-                    SendMessage(hEdit, WM_COPY, 0, 0);
-                    SendMessage(hEdit, EM_SETSEL, 0, 0);
-                }
-            } else if (id == OCR_BTN_RESCAN && g_overlay.selectionDone) {
-                if (InterlockedCompareExchange(&g_ocrBusy, 1, 0) == 0) {
-                    OcrSetPanelText(L"识别中…");
-                    StartOcrScan();
-                }
-            }
-            break;
-        }
-        case WM_DESTROY:
-            if (g_hWndOcrPanel == hWnd) g_hWndOcrPanel = NULL;
-            return 0;
-        default:
-            return DefWindowProc(hWnd, message, wParam, lParam);
-    }
-    return 0;
-}
-
-void CloseOcrPanel() {
-    if (g_hWndOcrPanel) {
-        DestroyWindow(g_hWndOcrPanel);
-        g_hWndOcrPanel = NULL;
-    }
-    g_ocrPanelActive = false;
-    if (g_hWndOverlay) InvalidateRect(g_hWndOverlay, NULL, FALSE);
-}
-
-static void OcrCreatePanel() {
-    static bool s_registered = false;
-    if (!s_registered) {
-        WNDCLASSEX wc = { 0 };
-        wc.cbSize = sizeof(WNDCLASSEX);
-        wc.lpfnWndProc = OcrPanelProc;
-        wc.hInstance = g_hInstance;
-        wc.hCursor = LoadCursor(NULL, IDC_ARROW);
-        wc.hbrBackground = NULL;
-        wc.lpszClassName = L"CaptureToolOcrPanelClass";
-        RegisterClassEx(&wc);
-        s_registered = true;
-    }
-    RECT sel = g_overlay.selection;
-    int pw = 440, ph = 380;
-    int sx = g_screenX, sy = g_screenY, sw = g_screenWidth, sh = g_screenHeight;
-    // 放置策略与长截屏面板一致：右→左→下→上→右下角兜底
-    int px, py;
-    if (sel.right + 12 + pw <= sx + sw) {
-        px = sel.right + 12;
-        py = max(sy + 8, min((int)sel.top, sy + sh - ph - 8));
-    } else if (sel.left - 12 - pw >= sx) {
-        px = sel.left - 12 - pw;
-        py = max(sy + 8, min((int)sel.top, sy + sh - ph - 8));
-    } else if (sel.bottom + 12 + ph <= sy + sh) {
-        py = sel.bottom + 12;
-        px = max(sx + 8, min((int)sel.left, sx + sw - pw - 8));
-    } else if (sel.top - 12 - ph >= sy) {
-        py = sel.top - 12 - ph;
-        px = max(sx + 8, min((int)sel.left, sx + sw - pw - 8));
-    } else {
-        px = sx + sw - pw - 8;
-        py = sy + sh - ph - 8;
-    }
-    g_hWndOcrPanel = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST, L"CaptureToolOcrPanelClass",
-                                     L"文字识别", WS_POPUP | WS_CAPTION | WS_SYSMENU,
-                                     px, py, pw, ph, NULL, NULL, g_hInstance, NULL);
-    if (!g_hWndOcrPanel) return;
-    // 对屏幕抓取隐身（与长截屏面板同款，避免污染后续操作）
-    typedef BOOL(WINAPI* PFN_SetWindowDisplayAffinity)(HWND, DWORD);
-    PFN_SetWindowDisplayAffinity pfn = (PFN_SetWindowDisplayAffinity)
-        GetProcAddress(GetModuleHandle(L"user32.dll"), "SetWindowDisplayAffinity");
-    if (pfn) pfn(g_hWndOcrPanel, WDA_EXCLUDEFROMCAPTURE);
-    ShowWindow(g_hWndOcrPanel, SW_SHOW);
-    g_ocrPanelActive = true;
-}
-
-// 从冻结截图提取选区像素（UI 线程 GDI 调用）并启动后台识别
-void StartOcrScan() {
-    RECT sel = g_overlay.selection;
-    int x1 = max(0L, sel.left), y1 = max(0L, sel.top);
-    int x2 = min((LONG)g_screenWidth, sel.right), y2 = min((LONG)g_screenHeight, sel.bottom);
-    int w = x2 - x1, h = y2 - y1;
-    if (w <= 0 || h <= 0) return;
-
-    OcrTask* task = new OcrTask();
-    task->w = w;
-    task->h = h;
-    task->pixels = new BYTE[(size_t)w * h * 4];
-    task->gen = g_ocrGen;
-
-    BITMAPINFO bi = {};
-    bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bi.bmiHeader.biWidth = w;
-    bi.bmiHeader.biHeight = -h; // 顶向下
-    bi.bmiHeader.biPlanes = 1;
-    bi.bmiHeader.biBitCount = 32;
-    HDC hdc = GetDC(NULL);
-    GetDIBits(hdc, g_hScreenCapture, 0, 0, NULL, &bi, DIB_RGB_COLORS); // 填充位图头
-    HDC hMem = CreateCompatibleDC(hdc);
-    HGDIOBJ old = SelectObject(hMem, g_hScreenCapture);
-    GetDIBits(hMem, g_hScreenCapture, 0, h, task->pixels, &bi, DIB_RGB_COLORS);
-    SelectObject(hMem, old);
-    DeleteDC(hMem);
-    ReleaseDC(NULL, hdc);
-    for (size_t i = 3; i < (size_t)w * h * 4; i += 4) task->pixels[i] = 0xFF; // alpha 置满
-
-    InterlockedExchange(&g_ocrBusy, 1);
-    HANDLE th = CreateThread(NULL, 0, OcrWorkerThread, task, 0, NULL);
-    if (th) CloseHandle(th);
-    else {
-        // 线程都创建失败：直接回收
-        InterlockedExchange(&g_ocrBusy, 0);
-        delete[] task->pixels;
-        delete task;
-    }
-}
-
-// 工具栏「扫描」入口：打开面板（含"识别中"态）并启动首次识别
-void EnterOcrMode(HWND hWnd) {
-    if (!g_overlay.selectionDone) return;
-    OcrCreatePanel();
-    if (!g_hWndOcrPanel) return;
-    OcrSetPanelText(L"识别中…");
-    if (InterlockedCompareExchange(&g_ocrBusy, 1, 0) == 0) {
-        StartOcrScan();
-    }
-    InvalidateRect(hWnd, NULL, FALSE);
-}
-
 // ========== 全屏 Overlay 覆盖画布窗口过程 WndProc ==========
 LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
@@ -5130,7 +4595,6 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
                         InvalidateRect(hWnd, NULL, FALSE);
                     }
                     else if (btn == 6) { // 文字
-                        CloseOcrPanel();
                         CommitEditingText();
                         g_selectedTextIndex = -1;
                         if (g_annotationMode == ANNOTATION_TEXT) {
@@ -5140,15 +4604,10 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
                         }
                         InvalidateRect(hWnd, NULL, FALSE);
                     }
-                    else if (btn == 7) { // 扫描文字（OCR）
-                        if (g_ocrPanelActive) CloseOcrPanel();
-                        else EnterOcrMode(hWnd);
-                    }
-                    else if (btn == 8) { // 长截屏（滚动截屏）
-                        CloseOcrPanel();
+                    else if (btn == 7) { // 长截屏（滚动截屏）
                         EnterScrollCapture(hWnd);
                     }
-                    else if (btn == 9) { // 撤销
+                    else if (btn == 8) { // 撤销
                         g_selectedTextIndex = -1;
                         if (g_isEditingText) {
                             ResetEditingTextState();
@@ -5157,13 +4616,13 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
                         }
                         InvalidateRect(hWnd, NULL, FALSE);
                     }
-                    else if (btn == 10) { // 保存
+                    else if (btn == 9) { // 保存
                         DoCaptureSaveAs(hWnd);
                     }
-                    else if (btn == 11) { // 取消
+                    else if (btn == 10) { // 取消
                         SendMessage(hWnd, WM_CLOSE, 0, 0);
                     }
-                    else if (btn == 12) { // 确定
+                    else if (btn == 11) { // 确定
                         DoCaptureConfirm(hWnd);
                     }
                     break; // 拦截消息，不往下处理
@@ -6254,18 +5713,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
     switch (message) {
         case WM_TRIGGER_CAPTURE: {
             TriggerCapture();
-            break;
-        }
-        case WM_OCR_DONE: {
-            // OCR 后台线程完成：代计数匹配且面板仍在 → 填充结果；否则丢弃
-            OcrTask* task = (OcrTask*)lParam;
-            if (task) {
-                if ((LONG)wParam == g_ocrGen && g_ocrPanelActive && IsWindow(g_hWndOcrPanel)) {
-                    OcrFillPanelWithTask(task);
-                }
-                delete[] task->pixels;
-                delete task;
-            }
             break;
         }
         case WM_TIMER: {
